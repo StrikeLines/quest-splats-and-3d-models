@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Grab Viewer – Splats &amp; 3D Models for Quest</title>
+<link rel="icon" href="data:," />
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #171b22;
+    --line: #2a313c;
+    --text: #e6e9ee;
+    --muted: #8b95a5;
+    --accent: #4fb3ff;
+    --accent-press: #2f8fd8;
+    --warn: #ffb454;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #canvas-host, #canvas-host canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #panel {
+    position: fixed; top: 20px; left: 20px; width: min(440px, calc(100% - 40px));
+    max-height: calc(100% - 40px); overflow-y: auto;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    border: 1px solid var(--line); border-radius: 14px; padding: 22px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.45);
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; min-height: 64px; padding: 14px 18px; border-radius: 12px;
+    border: 0; cursor: pointer; font-family: inherit; font-weight: 600; font-size: 18px; line-height: 1.2; color: #04121f;
+    background: var(--accent); transition: background .15s;
+  }
+  .btn:hover { background: #6cc1ff; }
+  .btn:active { background: var(--accent-press); }
+  .btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); min-height: 52px; font-size: 16px; }
+  .btn.secondary:hover { background: #1f252e; }
+  .btn[hidden] { display: none; }
+  .stack > * + * { margin-top: 10px; }
+  #file-input { display: none; }
+  #status { min-height: 24px; margin: 14px 0 0; font-size: 14px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  #status.error { color: var(--err); }
+  #status.warn { color: var(--warn); }
+  #progress { height: 6px; border-radius: 3px; background: #232a34; overflow: hidden; margin-top: 10px; display: none; }
+  #progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .15s; }
+  #progress.indeterminate > div { width: 35%; animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+  summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 15px; }
+  .row label { color: var(--text); }
+  .row small { display: block; color: var(--muted); font-size: 12px; }
+  select { background: #0f1319; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 150px; }
+  input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); flex: none; }
+  table.controls { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 10px; }
+  table.controls td { padding: 6px 0; border-bottom: 1px solid #222832; vertical-align: top; }
+  table.controls td:first-child { color: var(--accent); font-weight: 600; width: 44%; padding-right: 10px; }
+  .formats { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  #model-name { font-weight: 600; color: var(--text); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.4.0/dist/spark.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="canvas-host"></div>
+
+<div id="panel">
+  <h1>Grab Viewer</h1>
+  <p class="sub">Load a Gaussian splat or 3D model, then grab the space around it to move, scale and turn it.</p>
+
+  <div class="stack">
+    <label class="btn" for="file-input" id="pick-btn">Choose a file…</label>
+    <input type="file" id="file-input" />
+    <button class="btn" id="enter-btn" hidden>Enter VR</button>
+  </div>
+
+  <div id="progress"><div></div></div>
+  <div id="status">No model loaded.</div>
+
+  <details open>
+    <summary>Controls in VR</summary>
+    <table class="controls">
+      <tr><td>Grip (one hand)</td><td>Grab space and push, pull or slide the model</td></tr>
+      <tr><td>Grip (both hands)</td><td>Spread apart to zoom in, bring together to zoom out, turn like a steering wheel to rotate</td></tr>
+      <tr><td>A or X</td><td>Reset the model in front of you</td></tr>
+      <tr><td>B or Y</td><td>Leave VR and return to this page</td></tr>
+    </table>
+  </details>
+
+  <details>
+    <summary>Settings</summary>
+    <div class="row">
+      <label for="opt-mode">Display<small>Passthrough shows your room behind the model</small></label>
+      <select id="opt-mode">
+        <option value="immersive-vr">VR</option>
+        <option value="immersive-ar">Passthrough</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="opt-quality">Splat quality<small>Lower is smoother on large splats</small></label>
+      <select id="opt-quality">
+        <option value="performance">Performance</option>
+        <option value="balanced">Balanced</option>
+        <option value="detail">Detail</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="opt-flip">Flip splats upright<small>Most 3DGS training output is upside down</small></label>
+      <input type="checkbox" id="opt-flip" />
+    </div>
+    <div class="row">
+      <label for="opt-onehand-rotate">One-hand grab also rotates<small>Model follows your wrist as well as your hand</small></label>
+      <input type="checkbox" id="opt-onehand-rotate" />
+    </div>
+    <div class="row">
+      <label for="opt-upright">Keep model level<small>Two-hand turning only spins around the vertical axis</small></label>
+      <input type="checkbox" id="opt-upright" />
+    </div>
+    <div class="row">
+      <label for="opt-floor">Show floor grid</label>
+      <input type="checkbox" id="opt-floor" />
+    </div>
+    <p class="formats">
+      Splats: .ply (3DGS), .spz, .splat, .ksplat, .sog, .zip (SOG), .rad<br />
+      Models: .glb, .gltf (embedded), .obj, .fbx, .stl, .ply (mesh/points), .dae, .3mf, .usdz
+    </p>
+  </details>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { XRControllerModelFactory } from "three/addons/webxr/XRControllerModelFactory.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { PLYLoader } from "three/addons/loaders/PLYLoader.js";
+import { ColladaLoader } from "three/addons/loaders/ColladaLoader.js";
+import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
+import { USDZLoader } from "three/addons/loaders/USDZLoader.js";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+const THREE_CDN = "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/";
+const FIT_SIZE = 0.8;            // largest dimension of the model after load/reset (meters)
+const RESET_DISTANCE = 0.9;      // how far in front of your head the model appears (meters)
+const RESET_DROP = 0.25;         // how far below eye level the model's center sits (meters)
+const MIN_SCALE_FACTOR = 1e-4;   // relative to the fitted scale
+const MAX_SCALE_FACTOR = 1e4;
+const SPLAT_EXTS = new Set(["spz", "splat", "ksplat", "sog", "zip", "rad"]);
+const MESH_EXTS = new Set(["glb", "gltf", "obj", "fbx", "stl", "dae", "3mf", "usdz"]);
+const QUALITY = {
+  performance: { lodSplatScale: 0.7, framebufferScale: 0.5 },
+  balanced:    { lodSplatScale: 1.0, framebufferScale: 0.7 },
+  detail:      { lodSplatScale: 1.5, framebufferScale: 1.0 },
+};
+const BUTTON = { trigger: 0, grip: 1, ax: 4, by: 5 };
+
+// ---------------------------------------------------------------------------
+// Settings (persisted when storage is available)
+// ---------------------------------------------------------------------------
+const DEFAULT_SETTINGS = {
+  mode: "immersive-vr",
+  quality: "balanced",
+  flip: true,
+  oneHandRotate: false,
+  upright: false,
+  floor: true,
+};
+const settings = loadSettings();
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem("grabviewer.settings");
+    return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+function saveSettings() {
+  try { localStorage.setItem("grabviewer.settings", JSON.stringify(settings)); } catch { /* storage unavailable */ }
+}
+
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const ui = {
+  panel: $("panel"),
+  fileInput: $("file-input"),
+  pickBtn: $("pick-btn"),
+  enterBtn: $("enter-btn"),
+  status: $("status"),
+  progress: $("progress"),
+  progressBar: $("progress").firstElementChild,
+  mode: $("opt-mode"),
+  quality: $("opt-quality"),
+  flip: $("opt-flip"),
+  oneHandRotate: $("opt-onehand-rotate"),
+  upright: $("opt-upright"),
+  floor: $("opt-floor"),
+};
+
+ui.mode.value = settings.mode;
+ui.quality.value = settings.quality;
+ui.flip.checked = settings.flip;
+ui.oneHandRotate.checked = settings.oneHandRotate;
+ui.upright.checked = settings.upright;
+ui.floor.checked = settings.floor;
+
+function setStatus(text, kind = "") {
+  ui.status.textContent = text;
+  ui.status.className = kind;
+}
+function setProgress(fraction) {
+  if (fraction === null) { ui.progress.style.display = "none"; return; }
+  ui.progress.style.display = "block";
+  if (fraction === "indeterminate") {
+    ui.progress.classList.add("indeterminate");
+  } else {
+    ui.progress.classList.remove("indeterminate");
+    ui.progressBar.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
+  }
+}
+function formatBytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
+// ---------------------------------------------------------------------------
+// Renderer, scene, camera
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local-floor");
+$("canvas-host").appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const BG_COLOR = new THREE.Color(0x0e1116);
+scene.background = BG_COLOR;
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 2000);
+camera.position.set(0, 1.45, 0.6);
+
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 1.2, -0.8);
+orbit.enableDamping = true;
+orbit.update();
+
+// Lighting for mesh models (splats ignore it)
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(2, 4, 3);
+scene.add(sun);
+
+const floorGrid = new THREE.GridHelper(10, 20, 0x3a4554, 0x232a34);
+floorGrid.material.transparent = true;
+floorGrid.material.opacity = 0.6;
+floorGrid.visible = settings.floor;
+scene.add(floorGrid);
+
+// Spark splat renderer (must be in the scene)
+const spark = new SparkRenderer({ renderer, lodSplatScale: QUALITY[settings.quality].lodSplatScale });
+scene.add(spark);
+
+// modelRoot is what the user manipulates. Its origin is the model's center.
+const modelRoot = new THREE.Group();
+modelRoot.name = "modelRoot";
+scene.add(modelRoot);
+const DESKTOP_HOME = new THREE.Vector3(0, 1.2, -0.8);
+modelRoot.position.copy(DESKTOP_HOME);
+
+let current = null; // { kind: "splat"|"mesh", object, name, fitScale }
+
+// ---------------------------------------------------------------------------
+// Loaders
+// ---------------------------------------------------------------------------
+const dracoLoader = new DRACOLoader().setDecoderPath(`${THREE_CDN}libs/draco/gltf/`);
+const ktx2Loader = new KTX2Loader().setTranscoderPath(`${THREE_CDN}libs/basis/`).detectSupport(renderer);
+const gltfLoader = new GLTFLoader()
+  .setDRACOLoader(dracoLoader)
+  .setKTX2Loader(ktx2Loader)
+  .setMeshoptDecoder(MeshoptDecoder);
+
+function extOf(name) {
+  const m = /\.([^.]+)$/.exec(name.toLowerCase());
+  return m ? m[1] : "";
+}
+
+async function isSplatPly(file) {
+  const head = await file.slice(0, 64 * 1024).text();
+  const end = head.indexOf("end_header");
+  const header = end >= 0 ? head.slice(0, end) : head;
+  return /property\s+\w+\s+(f_dc_0|scale_0|rot_0|opacity)\b/.test(header) || /element\s+chunk\b/.test(header);
+}
+
+async function loadSplat(file, ext, onProgress) {
+  const opts = {
+    fileName: file.name,
+    onProgress: (e) => { if (e.lengthComputable && e.total) onProgress(e.loaded / e.total); },
+  };
+  if (ext !== "rad") opts.lod = true;
+  if (ext === "ply") {
+    // Stream large PLY files into Spark's worker instead of holding the whole file in memory.
+    opts.stream = file.stream();
+    opts.streamLength = file.size;
+  } else {
+    opts.fileBytes = new Uint8Array(await file.arrayBuffer());
+  }
+  const mesh = new SplatMesh(opts);
+  await mesh.initialized;
+  return mesh;
+}
+
+async function loadMesh(file, ext) {
+  switch (ext) {
+    case "glb":
+    case "gltf": {
+      const data = ext === "glb" ? await file.arrayBuffer() : await file.text();
+      const gltf = await gltfLoader.parseAsync(data, "");
+      return gltf.scene;
+    }
+    case "obj":
+      return new OBJLoader().parse(await file.text());
+    case "fbx":
+      return new FBXLoader().parse(await file.arrayBuffer(), "");
+    case "stl": {
+      const geom = new STLLoader().parse(await file.arrayBuffer());
+      geom.computeVertexNormals();
+      const mat = new THREE.MeshStandardMaterial({
+        color: geom.hasColors ? 0xffffff : 0xb8c2cc,
+        vertexColors: !!geom.hasColors,
+        metalness: 0.1, roughness: 0.6,
+      });
+      return new THREE.Mesh(geom, mat);
+    }
+    case "ply": {
+      const geom = new PLYLoader().parse(await file.arrayBuffer());
+      const hasColor = !!geom.getAttribute("color");
+      if (geom.index) {
+        if (!geom.getAttribute("normal")) geom.computeVertexNormals();
+        const mat = new THREE.MeshStandardMaterial({
+          color: hasColor ? 0xffffff : 0xb8c2cc, vertexColors: hasColor, metalness: 0.05, roughness: 0.7,
+        });
+        return new THREE.Mesh(geom, mat);
+      }
+      geom.computeBoundingBox();
+      const size = geom.boundingBox.getSize(new THREE.Vector3()).length();
+      const mat = new THREE.PointsMaterial({
+        size: size / 600, vertexColors: hasColor, color: hasColor ? 0xffffff : 0xcfd6dd, sizeAttenuation: true,
+      });
+      return new THREE.Points(geom, mat);
+    }
+    case "dae":
+      return new ColladaLoader().parse(await file.text(), "").scene;
+    case "3mf":
+      return new ThreeMFLoader().parse(await file.arrayBuffer());
+    case "usdz":
+      return new USDZLoader().parse(await file.arrayBuffer());
+    default:
+      throw new Error(`Unsupported file type: .${ext}`);
+  }
+}
+
+// Robust bounds for splats: percentile-trimmed so stray "floaters" don't shrink the model.
+function splatBounds(mesh) {
+  // With LoD enabled, Spark may keep the data only in the LoD copy (lodSplats), so use whichever has splats.
+  const candidates = [mesh.packedSplats, mesh.packedSplats?.lodSplats, mesh.extSplats, mesh.extSplats?.lodSplats];
+  const source = candidates.find((s) => s && s.numSplats > 0 && typeof s.forEachSplat === "function");
+  if (!source) return new THREE.Box3();
+  const stride = Math.max(1, Math.floor(source.numSplats / 200000));
+  const xs = [], ys = [], zs = [];
+  let i = 0;
+  source.forEachSplat((_idx, center, _scales, _quat, opacity) => {
+    if (i++ % stride !== 0 || opacity < 0.05) return;
+    xs.push(center.x); ys.push(center.y); zs.push(center.z);
+  });
+  if (xs.length < 10) return new THREE.Box3();
+  const pct = (arr, p) => {
+    arr.sort((a, b) => a - b);
+    return arr[Math.min(arr.length - 1, Math.max(0, Math.floor(p * (arr.length - 1))))];
+  };
+  const lo = 0.02, hi = 0.98;
+  return new THREE.Box3(
+    new THREE.Vector3(pct(xs, lo), pct(ys, lo), pct(zs, lo)),
+    new THREE.Vector3(pct(xs, hi), pct(ys, hi), pct(zs, hi)),
+  );
+}
+
+function disposeObject(obj) {
+  if (!obj) return;
+  if (obj.dispose && obj instanceof SplatMesh) { obj.dispose(); return; }
+  obj.traverse((o) => {
+    o.geometry?.dispose?.();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      for (const key of Object.keys(m)) {
+        const v = m[key];
+        if (v && v.isTexture) v.dispose();
+      }
+      m.dispose?.();
+    }
+  });
+}
+
+function clearModel() {
+  if (!current) return;
+  modelRoot.clear();
+  disposeObject(current.object);
+  current = null;
+}
+
+// Place `object` inside modelRoot so its center sits on modelRoot's origin, and return the fit scale.
+function mountModel(object, kind) {
+  // Measure while the object is still unparented, so bounds are in its own space.
+  let box;
+  if (kind === "splat") {
+    box = splatBounds(object);
+  } else {
+    object.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(object, true);
+  }
+
+  const inner = new THREE.Group();
+  if (kind === "splat" && settings.flip) inner.quaternion.set(1, 0, 0, 0); // rotate 180° about X
+  inner.add(object);
+  modelRoot.add(inner);
+
+  if (box.isEmpty() || !isFinite(box.min.x)) box = new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  object.position.sub(center);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  return FIT_SIZE / maxDim;
+}
+
+// ---------------------------------------------------------------------------
+// Loading a file
+// ---------------------------------------------------------------------------
+let loading = false;
+
+ui.fileInput.addEventListener("change", async () => {
+  const file = ui.fileInput.files?.[0];
+  ui.fileInput.value = ""; // allow re-selecting the same file later
+  if (!file || loading) return;
+  await openFile(file);
+});
+
+async function openFile(file) {
+  loading = true;
+  ui.enterBtn.hidden = true;
+  ui.pickBtn.style.pointerEvents = "none";
+  ui.pickBtn.style.opacity = "0.5";
+  clearModel();
+
+  const ext = extOf(file.name);
+  const t0 = performance.now();
+  try {
+    let kind;
+    if (SPLAT_EXTS.has(ext)) kind = "splat";
+    else if (MESH_EXTS.has(ext)) kind = "mesh";
+    else if (ext === "ply") kind = (await isSplatPly(file)) ? "splat" : "mesh";
+    else throw new Error(`Unsupported file type ".${ext || "?"}".`);
+
+    setStatus(`Loading ${file.name} (${formatBytes(file.size)})…`);
+    setProgress(kind === "splat" ? 0 : "indeterminate");
+
+    let object;
+    if (kind === "splat") {
+      let reportedOptimizing = false;
+      object = await loadSplat(file, ext, (f) => {
+        setProgress(f);
+        if (f >= 0.999 && !reportedOptimizing && ext !== "rad") {
+          reportedOptimizing = true;
+          setStatus(`Optimizing ${file.name} for VR (building level of detail)…`);
+          setProgress("indeterminate");
+        }
+      });
+    } else {
+      object = await loadMesh(file, ext);
+    }
+
+    const fitScale = mountModel(object, kind);
+    current = { kind, object, name: file.name, fitScale };
+    modelRoot.position.copy(DESKTOP_HOME);
+    modelRoot.quaternion.identity();
+    modelRoot.scale.setScalar(fitScale);
+    orbit.target.copy(DESKTOP_HOME);
+    orbit.update();
+
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    const count = kind === "splat" && object.numSplats ? ` · ${object.numSplats.toLocaleString()} splats` : "";
+    setProgress(null);
+    setStatus(`Loaded ${file.name}${count} in ${secs}s.`);
+    await enterXR({ auto: true });
+  } catch (err) {
+    console.error(err);
+    clearModel();
+    setProgress(null);
+    setStatus(`Could not load ${file.name}: ${err?.message ?? err}`, "error");
+  } finally {
+    loading = false;
+    ui.pickBtn.style.pointerEvents = "";
+    ui.pickBtn.style.opacity = "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entering / leaving XR
+// ---------------------------------------------------------------------------
+let xrSupported = { "immersive-vr": false, "immersive-ar": false };
+async function detectXR() {
+  if (!navigator.xr) return;
+  for (const mode of Object.keys(xrSupported)) {
+    try { xrSupported[mode] = await navigator.xr.isSessionSupported(mode); } catch { /* unsupported */ }
+  }
+  if (!xrSupported["immersive-ar"]) ui.mode.querySelector('option[value="immersive-ar"]').disabled = true;
+}
+const xrReady = detectXR();
+
+function pickMode() {
+  if (xrSupported[settings.mode]) return settings.mode;
+  return xrSupported["immersive-vr"] ? "immersive-vr" : xrSupported["immersive-ar"] ? "immersive-ar" : null;
+}
+
+function sessionInit() {
+  return { optionalFeatures: ["local-floor"] };
+}
+
+async function startSession(session, mode) {
+  const isSplat = current?.kind === "splat";
+  renderer.xr.setFramebufferScaleFactor(isSplat ? QUALITY[settings.quality].framebufferScale : 1.0);
+  renderer.xr.setFoveation(1);
+  scene.background = mode === "immersive-ar" ? null : BG_COLOR;
+  floorGrid.visible = settings.floor && mode !== "immersive-ar";
+  session.addEventListener("end", onSessionEnd, { once: true });
+  await renderer.xr.setSession(session);
+  ui.panel.style.visibility = "hidden";
+  pendingReset = true;
+}
+
+async function enterXR({ auto = false } = {}) {
+  await xrReady;
+  if (!current) return;
+  if (renderer.xr.isPresenting) return;
+  const mode = pickMode();
+  if (!mode) {
+    if (auto) setStatus(`${ui.status.textContent}\nVR isn't available in this browser, so it's shown here instead (drag to orbit, scroll to zoom).`, "warn");
+    return;
+  }
+  try {
+    const session = await navigator.xr.requestSession(mode, sessionInit());
+    await startSession(session, mode);
+  } catch (err) {
+    // Browsers usually require a fresh tap to start an immersive session.
+    console.warn("requestSession failed:", err);
+    ui.enterBtn.hidden = false;
+    ui.enterBtn.textContent = mode === "immersive-ar" ? "Enter Passthrough" : "Enter VR";
+    if (navigator.xr.offerSession) {
+      // Lets the browser show its own "Enter VR" prompt where supported.
+      navigator.xr.offerSession(mode, sessionInit())
+        .then((session) => startSession(session, mode))
+        .catch(() => { /* user ignored or not supported */ });
+    }
+  }
+}
+
+ui.enterBtn.addEventListener("click", () => enterXR());
+
+function onSessionEnd() {
+  ui.panel.style.visibility = "";
+  scene.background = BG_COLOR;
+  floorGrid.visible = settings.floor;
+  endGrab();
+  if (current) {
+    ui.enterBtn.hidden = false;
+    ui.enterBtn.textContent = pickMode() === "immersive-ar" ? "Re-enter Passthrough" : "Re-enter VR";
+    setStatus(`${current.name} is still loaded. Re-enter, or choose another file.`);
+    // Restore a sensible desktop view of the model.
+    modelRoot.position.copy(DESKTOP_HOME);
+    modelRoot.quaternion.identity();
+    modelRoot.scale.setScalar(current.fitScale);
+    orbit.target.copy(DESKTOP_HOME);
+    orbit.update();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Controllers
+// ---------------------------------------------------------------------------
+const controllerModelFactory = new XRControllerModelFactory();
+const hands = [0, 1].map((i) => {
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(controllerModelFactory.createControllerModel(grip));
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.012, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0x4fb3ff, transparent: true, opacity: 0.35 }),
+  );
+  grip.add(marker);
+  scene.add(grip);
+  const hand = { index: i, grip, marker, source: null, prev: [] , gripping: false };
+  grip.addEventListener("connected", (e) => { hand.source = e.data; hand.prev = []; });
+  grip.addEventListener("disconnected", () => { hand.source = null; hand.gripping = false; hand.prev = []; rebase(); });
+  return hand;
+});
+
+const handLine = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineBasicMaterial({ color: 0x4fb3ff, transparent: true, opacity: 0.6 }),
+);
+handLine.visible = false;
+handLine.frustumCulled = false;
+scene.add(handLine);
+
+function pulse(hand, intensity = 0.35, ms = 25) {
+  try { hand.source?.gamepad?.hapticActuators?.[0]?.pulse?.(intensity, ms); } catch { /* no haptics */ }
+}
+
+// ---------------------------------------------------------------------------
+// Grab manipulation
+// ---------------------------------------------------------------------------
+// The manipulation is computed from a snapshot taken whenever the set of gripping
+// hands changes ("rebase"), so there is no drift and switching between one and two
+// hands never makes the model jump.
+const grab = {
+  mode: 0,                     // 0 = none, 1 = one hand, 2 = two hands
+  hand: null,                  // one-hand: the gripping hand
+  startGripMatrix: new THREE.Matrix4(),
+  startModelMatrix: new THREE.Matrix4(),
+  startPos: new THREE.Vector3(),
+  startQuat: new THREE.Quaternion(),
+  startScale: 1,
+  startHandPos: new THREE.Vector3(),
+  startMid: new THREE.Vector3(),
+  startDir: new THREE.Vector3(),
+  startDist: 1,
+};
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _mid = new THREE.Vector3(), _dir = new THREE.Vector3();
+const _q = new THREE.Quaternion(), _m = new THREE.Matrix4(), _s = new THREE.Vector3(), _v = new THREE.Vector3();
+
+function handPos(hand, out) { return out.setFromMatrixPosition(hand.grip.matrixWorld); }
+
+function flatDir(v) { v.y = 0; return v.lengthSq() > 1e-8 ? v.normalize() : null; }
+
+function rebase() {
+  const active = hands.filter((h) => h.gripping && h.source);
+  grab.startPos.copy(modelRoot.position);
+  grab.startQuat.copy(modelRoot.quaternion);
+  grab.startScale = modelRoot.scale.x;
+  modelRoot.updateMatrix();
+  grab.startModelMatrix.copy(modelRoot.matrix);
+  if (active.length >= 2) {
+    grab.mode = 2;
+    handPos(active[0], _a);
+    handPos(active[1], _b);
+    grab.startMid.addVectors(_a, _b).multiplyScalar(0.5);
+    grab.startDir.subVectors(_b, _a);
+    grab.startDist = Math.max(1e-4, grab.startDir.length());
+    grab.startDir.normalize();
+    grab.pair = [active[0], active[1]];
+  } else if (active.length === 1) {
+    grab.mode = 1;
+    grab.hand = active[0];
+    handPos(grab.hand, grab.startHandPos);
+    grab.startGripMatrix.copy(grab.hand.grip.matrixWorld);
+  } else {
+    grab.mode = 0;
+    grab.hand = null;
+  }
+  handLine.visible = grab.mode === 2;
+}
+
+function endGrab() {
+  for (const h of hands) { h.gripping = false; h.prev = []; }
+  grab.mode = 0;
+  handLine.visible = false;
+}
+
+function applyGrab() {
+  if (!current) return;
+  if (grab.mode === 1) {
+    const h = grab.hand;
+    if (settings.oneHandRotate) {
+      // model = grip * grip0^-1 * model0  (rigid follow)
+      _m.copy(grab.startGripMatrix).invert().premultiply(h.grip.matrixWorld).multiply(grab.startModelMatrix);
+      _m.decompose(modelRoot.position, modelRoot.quaternion, _s);
+    } else {
+      handPos(h, _a).sub(grab.startHandPos);
+      modelRoot.position.copy(grab.startPos).add(_a);
+    }
+  } else if (grab.mode === 2) {
+    const [h0, h1] = grab.pair;
+    handPos(h0, _a);
+    handPos(h1, _b);
+    _mid.addVectors(_a, _b).multiplyScalar(0.5);
+    _dir.subVectors(_b, _a);
+    const dist = Math.max(1e-4, _dir.length());
+    _dir.normalize();
+
+    // Scale: ratio of hand separation
+    const fit = current.fitScale;
+    let s = (dist / grab.startDist);
+    const newScale = THREE.MathUtils.clamp(grab.startScale * s, fit * MIN_SCALE_FACTOR, fit * MAX_SCALE_FACTOR);
+    s = newScale / grab.startScale;
+
+    // Rotation: the rotation that carries the starting hand-to-hand direction onto the current one
+    if (settings.upright) {
+      const d0 = flatDir(_v.copy(grab.startDir));
+      const d1 = d0 ? flatDir(_a.copy(_dir)) : null;
+      if (d0 && d1) _q.setFromUnitVectors(d0, d1); else _q.identity();
+    } else {
+      _q.setFromUnitVectors(grab.startDir, _dir);
+    }
+
+    // Pivot around the midpoint between the hands
+    modelRoot.quaternion.copy(_q).multiply(grab.startQuat);
+    modelRoot.scale.setScalar(newScale);
+    _v.copy(grab.startPos).sub(grab.startMid).multiplyScalar(s).applyQuaternion(_q);
+    modelRoot.position.copy(_mid).add(_v);
+
+    // Visual feedback line
+    const p = handLine.geometry.attributes.position;
+    handPos(h0, _a); handPos(h1, _b);
+    p.setXYZ(0, _a.x, _a.y, _a.z);
+    p.setXYZ(1, _b.x, _b.y, _b.z);
+    p.needsUpdate = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reset: put the model in front of the user's head at its fitted size
+// ---------------------------------------------------------------------------
+let pendingReset = false;
+let resetWaitFrames = 0;
+
+function resetModel() {
+  if (!current) return;
+  const xrCam = renderer.xr.getCamera();
+  const head = new THREE.Vector3().setFromMatrixPosition(xrCam.matrixWorld);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(xrCam.matrixWorld));
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+  const yaw = Math.atan2(-fwd.x, -fwd.z);
+  modelRoot.position.copy(head).addScaledVector(fwd, RESET_DISTANCE);
+  modelRoot.position.y = Math.max(0.3, head.y - RESET_DROP);
+  modelRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  modelRoot.scale.setScalar(current.fitScale);
+  if (grab.mode) rebase();
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame input handling
+// ---------------------------------------------------------------------------
+function pressedEdge(hand, idx) {
+  const btn = hand.source?.gamepad?.buttons?.[idx];
+  const now = !!btn?.pressed;
+  const before = !!hand.prev[idx];
+  hand.prev[idx] = now;
+  return { now, down: now && !before, up: !now && before };
+}
+
+function handleXRInput() {
+  let changed = false;
+  let exit = false, reset = false;
+  for (const h of hands) {
+    if (!h.source?.gamepad) continue;
+    const g = pressedEdge(h, BUTTON.grip);
+    if (g.down) { h.gripping = true; changed = true; pulse(h); }
+    if (g.up) { h.gripping = false; changed = true; }
+    h.marker.material.opacity = h.gripping ? 0.9 : 0.35;
+    if (pressedEdge(h, BUTTON.ax).down) reset = true;
+    if (pressedEdge(h, BUTTON.by).down) exit = true;
+  }
+  if (changed) rebase();
+  if (reset) { resetModel(); for (const h of hands) pulse(h, 0.2, 20); }
+  if (exit) { renderer.xr.getSession()?.end(); return; }
+  applyGrab();
+}
+
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
+renderer.setAnimationLoop(() => {
+  if (renderer.xr.isPresenting) {
+    for (const h of hands) h.grip.updateMatrixWorld(true);
+    if (pendingReset) {
+      // Wait a few frames so the head pose is valid before placing the model.
+      const cam = renderer.xr.getCamera();
+      if (++resetWaitFrames > 3 && cam.matrixWorld.elements[13] !== 0) {
+        resetModel();
+        pendingReset = false;
+        resetWaitFrames = 0;
+      }
+    }
+    handleXRInput();
+  } else {
+    orbit.update();
+  }
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Settings wiring
+// ---------------------------------------------------------------------------
+ui.mode.addEventListener("change", () => { settings.mode = ui.mode.value; saveSettings(); });
+ui.quality.addEventListener("change", () => {
+  settings.quality = ui.quality.value;
+  spark.lodSplatScale = QUALITY[settings.quality].lodSplatScale;
+  saveSettings();
+});
+ui.flip.addEventListener("change", () => {
+  settings.flip = ui.flip.checked;
+  saveSettings();
+  if (current?.kind === "splat") {
+    const inner = current.object.parent;
+    inner.quaternion.copy(settings.flip ? new THREE.Quaternion(1, 0, 0, 0) : new THREE.Quaternion());
+  }
+});
+ui.oneHandRotate.addEventListener("change", () => { settings.oneHandRotate = ui.oneHandRotate.checked; saveSettings(); });
+ui.upright.addEventListener("change", () => { settings.upright = ui.upright.checked; saveSettings(); });
+ui.floor.addEventListener("change", () => {
+  settings.floor = ui.floor.checked;
+  floorGrid.visible = settings.floor;
+  saveSettings();
+});
+
+// Handy for debugging from the Quest browser's remote devtools (chrome://inspect)
+window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, get current() { return current; } };
+</script>
+</body>
+</html>
