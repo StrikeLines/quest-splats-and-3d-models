@@ -48,7 +48,19 @@ The two-hand twist needs both controllers, so it's VR only.
 
 While you point, a dot shows the part you'd grab and small dots mark the joints that will bend. Orange dots are pins. Posing pauses any playing animation; pressing play hands control back to the animation. The 2D page also has Undo, Redo, Reset pose and Clear pins buttons.
 
-This is generic inverse kinematics: it doesn't know a knee from an elbow, so a joint can occasionally bend the wrong way. Undo, or drag it back.
+#### Natural joint limits (Mixamo rigs)
+
+When the skeleton uses Mixamo bone names (with or without the `mixamorig:` prefix), posing switches to a humanoid mode:
+
+- Every joint stays within a natural human range: spine segments, neck, head, collarbones, shoulders, elbows, wrists, hips, knees, ankles and toes. Fingers and forearm/wrist twist are only loosely limited, because rigs split them differently.
+- Knees and elbows are solved exactly as two-bone limbs, so they bend in their natural plane and never backward.
+- Dragging a foot keeps it level. Pinned feet stay flat too.
+- The hips can be dragged. Pin both feet (tap them), then drag the hips down to squat or sideways to shift weight.
+- While a drag is held against a limit, the grab dot turns red (and the controller buzzes in VR).
+
+Limits are anchored to the body (up, forward and sideways from the skeleton), not to the pose the model was rigged in, so A-pose, T-pose and scanned rest poses all work. The ranges were checked against Mixamo animation: a 12-second Mixamo clip stays inside them. A **Natural joint limits** checkbox in the Pose panel turns them off.
+
+Other rigs use generic inverse kinematics: it doesn't know a knee from an elbow, so a joint can occasionally bend the wrong way. Undo, or drag it back.
 
 ## Formats
 

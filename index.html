@@ -71,6 +71,7 @@
   .pose-buttons { flex-wrap: wrap; gap: 8px; }
   .pose-buttons .btn.secondary { width: auto; flex: 1 1 40%; min-height: 44px; font-size: 15px; }
   .btn.secondary:disabled { opacity: .4; cursor: default; }
+  #limits-row[hidden] { display: none; }
   .stepper { display: flex; align-items: center; gap: 10px; flex: none; }
   .stepper .btn.secondary { width: 44px; min-height: 40px; padding: 0; font-size: 20px; }
   #chain-len { min-width: 1.5em; text-align: center; font-weight: 600; }
@@ -118,6 +119,7 @@
       <tr><td>Thumbstick up / down</td><td>More / fewer joints bend when you drag</td></tr>
       <tr><td>Thumbstick left / right</td><td>Undo / redo (on models that can't be posed: previous / next animation)</td></tr>
     </table>
+    <p class="formats" style="margin-top:10px">Mixamo rigs: joints stay within natural human ranges, knees and elbows bend the right way, and feet stay flat. To squat, pin both feet (tap them), then drag the hips down.</p>
     <p class="formats" style="margin-top:14px">Mouse, in this 2D view (rigged models):</p>
     <table class="controls">
       <tr><td>Drag a body part</td><td>Pose it; it stays pinned where you leave it</td></tr>
@@ -131,6 +133,10 @@
   <div id="pose-panel" hidden>
     <div class="row">
       <label>Pose<small id="pose-info"></small></label>
+    </div>
+    <div class="row" id="limits-row" hidden>
+      <label for="opt-limits">Natural joint limits<small>Mixamo rig detected: joints stay within human ranges, feet stay flat</small></label>
+      <input type="checkbox" id="opt-limits" />
     </div>
     <div class="row">
       <label>Joints that bend per drag<small>Thumbstick up/down in VR, [ and ] keys here</small></label>
@@ -267,6 +273,7 @@ const DEFAULT_SETTINGS = {
   oneHandRotate: false,
   upright: false,
   floor: true,
+  limits: true,
 };
 const settings = loadSettings();
 
@@ -313,6 +320,8 @@ const ui = {
   chainMinus: $("chain-minus"),
   chainPlus: $("chain-plus"),
   chainLen: $("chain-len"),
+  limitsRow: $("limits-row"),
+  limits: $("opt-limits"),
 };
 
 ui.mode.value = settings.mode;
@@ -321,6 +330,7 @@ ui.flip.checked = settings.flip;
 ui.oneHandRotate.checked = settings.oneHandRotate;
 ui.upright.checked = settings.upright;
 ui.floor.checked = settings.floor;
+ui.limits.checked = settings.limits;
 
 function setStatus(text, kind = "") {
   ui.status.textContent = text;
@@ -1058,6 +1068,8 @@ const pose = {
   pins: [],               // { bone, local: Vector3 (bone space), target: Vector3 (modelRoot space) }
   undo: [],
   redo: [],
+  humanoid: null,         // Mixamo humanoid info (joint limits, limb solvers) or null
+  limitHit: false,
 };
 const _pv = Array.from({ length: 10 }, () => new THREE.Vector3());
 const _pq = new THREE.Quaternion(), _pq2 = new THREE.Quaternion(), _pqI = new THREE.Quaternion();
@@ -1083,8 +1095,11 @@ function snapshotBones(rig = pose.rig) {
 function snapshotPose() {
   return {
     bones: snapshotBones(),
-    pins: pose.pins.map((p) => ({ bone: p.bone, local: p.local.clone(), target: p.target.clone() })),
+    pins: pose.pins.map(copyPin),
   };
+}
+function copyPin(p) {
+  return { bone: p.bone, local: p.local.clone(), target: p.target.clone(), lockBone: p.lockBone, lockQ: p.lockQ?.clone() };
 }
 function applyBones(snap) {
   pose.rig.bones.forEach((b, i) => {
@@ -1096,7 +1111,7 @@ function applyBones(snap) {
 }
 function applySnapshot(s) {
   applyBones(s.bones);
-  pose.pins = s.pins.map((p) => ({ bone: p.bone, local: p.local.clone(), target: p.target.clone() }));
+  pose.pins = s.pins.map(copyPin);
 }
 function pushUndo(snap) {
   pose.undo.push(snap);
@@ -1143,13 +1158,16 @@ function setupPosing(object) {
   clearPosing();
   pose.rig = buildRig(object);
   if (!pose.rig) return;
+  try { pose.humanoid = buildHumanoid(pose.rig, object); } catch (err) { console.warn("Humanoid detection failed:", err); pose.humanoid = null; }
   pose.chainLen = POSE.defaultChain;
   ui.posePanel.hidden = false;
+  ui.limitsRow.hidden = !pose.humanoid;
   updatePoseUi();
 }
 function clearPosing() {
   for (const h of hands) h.poseGrab = null;
   pose.rig = null;
+  pose.humanoid = null;
   pose.pins = [];
   pose.undo = [];
   pose.redo = [];
@@ -1159,7 +1177,7 @@ function clearPosing() {
 function updatePoseUi() {
   if (!pose.rig) return;
   const pins = pose.pins.length;
-  ui.poseInfo.textContent = `${pose.rig.bones.length} bones · ${pose.chainLen} joint${pose.chainLen > 1 ? "s" : ""} bend per drag` +
+  ui.poseInfo.textContent = `${pose.humanoid ? (humanoidActive() ? "Mixamo humanoid · " : "Mixamo humanoid (limits off) · ") : ""}${pose.rig.bones.length} bones · ${pose.chainLen} joint${pose.chainLen > 1 ? "s" : ""} bend per drag` +
     (pins ? ` · ${pins} pinned` : "");
   ui.chainLen.textContent = String(pose.chainLen);
   ui.chainMinus.disabled = pose.chainLen <= POSE.minChain;
@@ -1173,6 +1191,11 @@ ui.poseRedo.addEventListener("click", () => redoPose());
 ui.poseReset.addEventListener("click", () => resetPose());
 ui.poseUnpin.addEventListener("click", () => clearPins());
 ui.chainMinus.addEventListener("click", () => stepChainLength(-1));
+ui.limits.addEventListener("change", () => {
+  settings.limits = ui.limits.checked;
+  saveSettings();
+  updatePoseUi();
+});
 ui.chainPlus.addEventListener("click", () => stepChainLength(+1));
 
 // Size of the model in world units, used to scale pick distances and tolerances.
@@ -1199,7 +1222,15 @@ function pickBone(origin, dir) {
       const t = onRay.clone().sub(origin).dot(dir);
       if (t < 0 || d > maxDist) continue;
       const score = d + t * 0.03; // prefer what's nearer along the ray (the front of the body)
-      if (!best || score < best.score) best = { bone: b, point: onSeg.clone(), t, score };
+      const len2 = p1.distanceToSquared(p0);
+      const sAlong = len2 > 1e-12 ? onSeg.clone().sub(p0).dot(p1.clone().sub(p0)) / len2 : 0;
+      if (!best || score < best.score) best = { bone: b, point: onSeg.clone(), t, score, kid: k, sAlong };
+    }
+  }
+  // Humanoids: grabbing the shin near the ankle (or the forearm near the wrist) means the foot (hand).
+  if (best && humanoidActive()) {
+    for (const limb of new Set(pose.humanoid.limbEnd.values())) {
+      if (limb.mid === best.bone && best.kid === limb.end && best.sAlong > 0.75) { best.bone = limb.end; break; }
     }
   }
   return best;
@@ -1242,17 +1273,25 @@ function limitRotation(q, maxAngle) {
 
 // Cyclic coordinate descent IK: turn each joint (nearest the effector first) to point
 // the effector at the target.
-function ccd(chain, effector, target, iterations, tol) {
+function ccd(chain, effector, target, iterations, tol, constrain = false) {
   const j = _pv[4], v1 = _pv[5], v2 = _pv[6], q = new THREE.Quaternion();
   for (let it = 0; it < iterations; it++) {
     for (const bone of chain) {
       j.setFromMatrixPosition(bone.matrixWorld);
       v1.copy(effector()).sub(j);
       v2.copy(target).sub(j);
+      const hc = constrain ? pose.humanoid?.constraints.get(bone) : null;
+      if (hc?.hinge) {
+        // Hinge (knee, elbow): only turn around the hinge axis.
+        const axis = _pv[3].copy(hc.hingeAxis).applyQuaternion(bone.parent.getWorldQuaternion(_pq2)).normalize();
+        v1.addScaledVector(axis, -v1.dot(axis));
+        v2.addScaledVector(axis, -v2.dot(axis));
+      }
       if (v1.lengthSq() < 1e-12 || v2.lengthSq() < 1e-12) continue;
       q.setFromUnitVectors(v1.normalize(), v2.normalize());
       limitRotation(q, POSE.maxStepAngle);
       rotateBoneWorld(bone, q);
+      if (constrain) constrainBone(bone);
     }
     if (effector().distanceTo(target) < tol) break;
   }
@@ -1263,10 +1302,438 @@ function grabEffector(g) {
   return () => g.bone.localToWorld(out.copy(g.local));
 }
 
+// ---------------------------------------------------------------------------
+// Natural joint limits for Mixamo humanoids
+// ---------------------------------------------------------------------------
+// Limits are anchored to the body, not to however the rig happens to be posed:
+// body axes (up, right, forward) come from the skeleton's bind pose, and each joint gets
+// a neutral direction plus flex/side axes in its parent's space. Swing is limited with an
+// elliptical cone around the neutral direction; twist around the bone is limited relative
+// to the bind pose.
+const MIXAMO_PREFIX = /^mixamorig\d*[:_]?/i;
+const MIXAMO_REQUIRED = [
+  "Hips", "Spine", "Neck", "Head",
+  "LeftArm", "LeftForeArm", "LeftHand", "RightArm", "RightForeArm", "RightHand",
+  "LeftUpLeg", "LeftLeg", "LeftFoot", "RightUpLeg", "RightLeg", "RightFoot",
+];
+// Degrees. Ball joints: flex/ext toward / away from the flex axis, abd/add toward / away
+// from the side axis (an elliptical cone), twist around the bone either way.
+// Hinges (hinge: true): bend range flex/ext in the hinge plane, plus lat degrees of
+// sideways wobble out of that plane.
+// Checked against Mixamo motion: a 12 s Mixamo animation stays inside these ranges
+// (fingers and forearm/wrist twist are deliberately loose: rigs split them differently).
+const JOINT_LIMITS = {
+  Spine:    { flex: 30, ext: 20, abd: 22, add: 22, twist: 22 },
+  Spine1:   { flex: 30, ext: 20, abd: 22, add: 22, twist: 22 },
+  Spine2:   { flex: 30, ext: 20, abd: 22, add: 22, twist: 22 },
+  Neck:     { flex: 40, ext: 40, abd: 30, add: 30, twist: 45 },
+  Head:     { flex: 45, ext: 45, abd: 50, add: 50, twist: 60 },
+  Shoulder: { flex: 30, ext: 40, abd: 50, add: 35, twist: 15 },
+  Arm:      { flex: 135, ext: 50, abd: 95, add: 95, twist: 80 },
+  ForeArm:  { hinge: true, flex: 150, ext: 8, lat: 36, twist: 120 },
+  Hand:     { flex: 80, ext: 80, abd: 80, add: 80, twist: 150 },
+  UpLeg:    { flex: 120, ext: 25, abd: 45, add: 30, twist: 40 },
+  Leg:      { hinge: true, flex: 150, ext: 6, lat: 12, twist: 20 },
+  Foot:     { flex: 40, ext: 50, abd: 40, add: 40, twist: 30 },
+  ToeBase:  { flex: 50, ext: 30, abd: 10, add: 10, twist: 10 },
+  Finger1:  { flex: 100, ext: 100, abd: 100, add: 100, twist: 45 },
+  Finger2:  { flex: 100, ext: 100, abd: 100, add: 100, twist: 45 },
+  Finger3:  { flex: 100, ext: 100, abd: 100, add: 100, twist: 45 },
+  Thumb:    { flex: 100, ext: 100, abd: 100, add: 100, twist: 45 },
+};
+// n: neutral direction — "bind" (as rigged), "parentAxis" (straight on from the parent
+// bone) or a body direction. f: flex axis — a body direction or "bend" (the bend already in
+// the bind pose, which reveals a hinge's plane; fb is the fallback). o: side axis.
+// Body directions: F forward, U up, R the character's right, out (away from the midline),
+// palm (the side the fingers curl toward), thumb.
+const JOINT_FRAMES = {
+  Spine:    { n: "bind", f: "F", o: "R" },
+  Spine1:   { n: "bind", f: "F", o: "R" },
+  Spine2:   { n: "bind", f: "F", o: "R" },
+  Neck:     { n: "bind", f: "F", o: "R" },
+  Head:     { n: "bind", f: "F", o: "R" },
+  Shoulder: { n: "bind", f: "F", o: "U" },
+  Arm:      { n: "out", f: "F", o: "U" },
+  ForeArm:  { n: "parentAxis", f: "bend", fb: "F", o: "U" },
+  Hand:     { n: "parentAxis", f: "palm", o: "thumb" },
+  UpLeg:    { n: "-U", f: "F", o: "out" },
+  Leg:      { n: "parentAxis", f: "bend", fb: "-F", o: "out" },
+  Foot:     { n: "bind", f: "U", o: "out" },
+  ToeBase:  { n: "bind", f: "U", o: "out" },
+  Finger1:  { n: "bind", f: "palm", o: "thumb" },
+  Finger2:  { n: "parentAxis", f: "bend", fb: "palm", o: "thumb" },
+  Finger3:  { n: "parentAxis", f: "bend", fb: "palm", o: "thumb" },
+  Thumb:    { n: "bind", f: "palm", o: "F" },
+};
+const NEXT_BONE = {
+  Hips: "Spine", Spine: "Spine1", Spine1: "Spine2", Spine2: "Neck", Neck: "Head", Head: "HeadTop_End",
+  Shoulder: "Arm", Arm: "ForeArm", ForeArm: "Hand", Hand: "HandMiddle1",
+  UpLeg: "Leg", Leg: "Foot", Foot: "ToeBase", ToeBase: "Toe_End",
+};
+const DEG = Math.PI / 180;
+
+function jointKey(role) {
+  const s = role.replace(/^(Left|Right)/, "");
+  if (/^HandThumb[123]$/.test(s)) return "Thumb";
+  const m = /^Hand(Index|Middle|Ring|Pinky)([123])$/.exec(s);
+  if (m) return `Finger${m[2]}`;
+  return s;
+}
+
+function buildHumanoid(rig, root) {
+  const role = new Map(), byRole = new Map();
+  for (const b of rig.bones) {
+    const r = b.name.replace(MIXAMO_PREFIX, "");
+    if (!byRole.has(r)) { byRole.set(r, b); role.set(b, r); }
+  }
+  if (!MIXAMO_REQUIRED.every((r) => byRole.has(r))) return null;
+  const B = (r) => byRole.get(r);
+
+  // Bind pose (what the skin was bound in) from the skeleton's inverse bind matrices.
+  let skel = null;
+  root.traverse((o) => {
+    if (o.isSkinnedMesh && o.skeleton?.bones.includes(B("Hips")) && (!skel || o.skeleton.bones.length > skel.bones.length)) skel = o.skeleton;
+  });
+  if (!skel) return null;
+  const saved = snapshotBones(rig);
+  skel.pose();
+  const bindW = new Map(), bindQ = new Map(), bindP = new Map();
+  for (const b of skel.bones) {
+    if (!b) continue;
+    bindW.set(b, b.matrixWorld.clone());
+    bindQ.set(b, b.quaternion.clone());
+    bindP.set(b, b.position.clone());
+  }
+  applyBones(saved);
+
+  const tmpP = new THREE.Vector3(), tmpS = new THREE.Vector3();
+  const wpos = (b) => new THREE.Vector3().setFromMatrixPosition(bindW.get(b));
+  const wquat = (b) => { const q = new THREE.Quaternion(); bindW.get(b).decompose(tmpP, q, tmpS); return q; };
+
+  // Body axes
+  const U = wpos(B("Head")).sub(wpos(B("Hips"))).normalize();
+  const R = wpos(B("RightUpLeg")).sub(wpos(B("LeftUpLeg")));
+  R.addScaledVector(U, -R.dot(U)).normalize();
+  const F = new THREE.Vector3().crossVectors(U, R);
+
+  // Palm direction per side: the side the fingers curl toward.
+  const palm = {}, thumb = {};
+  for (const side of ["Left", "Right"]) {
+    const hand = B(`${side}Hand`);
+    const hp = wpos(hand);
+    const idx = B(`${side}HandIndex1`), pky = B(`${side}HandPinky1`);
+    let N = null;
+    if (idx && pky && bindW.has(idx) && bindW.has(pky)) {
+      N = new THREE.Vector3().crossVectors(wpos(idx).sub(hp), wpos(pky).sub(hp)).normalize();
+      const curl = new THREE.Vector3();
+      for (const f of ["Index", "Middle", "Ring", "Pinky"]) {
+        const a = B(`${side}Hand${f}1`), b = B(`${side}Hand${f}2`), c = B(`${side}Hand${f}3`);
+        if (!a || !b || !c || !bindW.has(a) || !bindW.has(b) || !bindW.has(c)) continue;
+        const d1 = wpos(b).sub(wpos(a)).normalize(), d2 = wpos(c).sub(wpos(b)).normalize();
+        curl.add(d2.addScaledVector(d1, -d1.dot(d2)));
+      }
+      const t = B(`${side}HandThumb2`);
+      if (curl.length() > 0.05) { if (N.dot(curl) < 0) N.negate(); }
+      else if (t && bindW.has(t) && N.dot(wpos(t).sub(hp)) < 0) N.negate();
+    }
+    palm[side] = N || U.clone().negate();
+    const t1 = B(`${side}HandThumb1`);
+    thumb[side] = t1 && bindW.has(t1) ? wpos(t1).sub(hp).normalize() : F.clone();
+  }
+
+  const mainChild = (b) => {
+    const r = role.get(b);
+    const side = /^(Left|Right)/.exec(r)?.[1] ?? "";
+    const base = r.replace(/^(Left|Right)/, "");
+    let next = NEXT_BONE[base] ? side + NEXT_BONE[base] : null;
+    const fm = /^Hand(Thumb|Index|Middle|Ring|Pinky)([123])$/.exec(base);
+    if (fm) next = `${side}Hand${fm[1]}${Number(fm[2]) + 1}`;
+    const nb = next && B(next);
+    if (nb && nb.parent === b && bindP.has(nb)) return nb;
+    const kids = rig.children.get(b).filter((k) => bindP.has(k));
+    return kids.length === 1 ? kids[0] : null;
+  };
+
+  const constraints = new Map();
+  for (const b of rig.bones) {
+    const r = role.get(b);
+    if (!r || r === "Hips") continue;
+    const key = jointKey(r);
+    const lim = JOINT_LIMITS[key], fr = JOINT_FRAMES[key];
+    const parent = b.parent;
+    if (!lim || !fr || !parent || !bindW.has(parent) || !bindQ.has(b)) continue;
+    const side = r.startsWith("Left") ? "Left" : r.startsWith("Right") ? "Right" : null;
+    const qB = bindQ.get(b);
+    const child = mainChild(b);
+    const dLocal = child
+      ? bindP.get(child).clone().normalize()
+      : bindP.get(b).clone().applyQuaternion(qB.clone().invert()).normalize();
+    if (!isFinite(dLocal.x) || dLocal.lengthSq() < 0.5) continue;
+    const toParent = wquat(parent).invert();
+    const body = (name) => {
+      const v = {
+        F: F, "-F": F.clone().negate(), U: U, "-U": U.clone().negate(), R: R,
+        out: side === "Left" ? R.clone().negate() : R,
+        palm: palm[side] || U.clone().negate(), thumb: thumb[side] || F,
+      }[name];
+      return v.clone().applyQuaternion(toParent);
+    };
+    const bindDir = dLocal.clone().applyQuaternion(qB);
+    let n;
+    if (fr.n === "bind") n = bindDir.clone();
+    else if (fr.n === "parentAxis") n = bindP.get(b).clone().normalize();
+    else n = body(fr.n);
+    if (n.lengthSq() < 1e-8) continue;
+    n.normalize();
+    let f;
+    if (fr.f === "bend") {
+      const perp = bindDir.clone().addScaledVector(n, -bindDir.dot(n));
+      f = perp.length() > Math.sin(10 * DEG) ? perp : body(fr.fb);
+    } else f = body(fr.f);
+    f.addScaledVector(n, -f.dot(n));
+    if (f.lengthSq() < 1e-6) f.set(1, 0, 0).addScaledVector(n, -n.x);
+    f.normalize();
+    const o = body(fr.o);
+    o.addScaledVector(n, -o.dot(n)).addScaledVector(f, -o.dot(f));
+    if (o.lengthSq() < 1e-6) o.crossVectors(n, f);
+    o.normalize();
+    constraints.set(b, {
+      key, n, f, o, dLocal, qBind: qB.clone(), qBindInv: qB.clone().invert(),
+      hinge: !!lim.hinge,
+      hingeAxis: new THREE.Vector3().crossVectors(n, f).normalize(), // rotating n about this moves it toward f
+      lat: (lim.lat ?? 0) * DEG,
+      flex: Math.max(0.5, lim.flex) * DEG, ext: Math.max(0.5, lim.ext) * DEG,
+      abd: Math.max(0.5, lim.abd ?? 0) * DEG, add: Math.max(0.5, lim.add ?? 0) * DEG,
+      twist: lim.twist * DEG,
+    });
+  }
+
+  // Limb chains solved analytically (thigh+shin, upper arm+forearm)
+  const limbEnd = new Map();
+  for (const side of ["Left", "Right"]) {
+    const leg = { kind: "leg", upper: B(`${side}UpLeg`), mid: B(`${side}Leg`), end: B(`${side}Foot`) };
+    const arm = { kind: "arm", upper: B(`${side}Arm`), mid: B(`${side}ForeArm`), end: B(`${side}Hand`) };
+    if (leg.mid.parent === leg.upper && leg.end.parent === leg.mid && constraints.has(leg.mid)) {
+      limbEnd.set(leg.end, leg);
+      const toe = B(`${side}ToeBase`);
+      if (toe && toe.parent === leg.end) limbEnd.set(toe, leg);
+    }
+    if (arm.mid.parent === arm.upper && arm.end.parent === arm.mid && constraints.has(arm.mid)) limbEnd.set(arm.end, arm);
+  }
+  return { kind: "Mixamo", role, byRole, hips: B("Hips"), constraints, limbEnd, axes: { U, R, F } };
+}
+
+function humanoidActive() {
+  return !!pose.humanoid && settings.limits;
+}
+
+const _cq1 = new THREE.Quaternion(), _cq2 = new THREE.Quaternion(), _cq3 = new THREE.Quaternion(), _cq4 = new THREE.Quaternion();
+const _cv1 = new THREE.Vector3(), _cv2 = new THREE.Vector3();
+
+// Hinge angles of a direction d (parent space): bend within the hinge plane, and sideways deviation from it.
+function hingeAngles(c, d) {
+  return {
+    bend: Math.atan2(d.dot(c.f), d.dot(c.n)),
+    dev: Math.asin(THREE.MathUtils.clamp(d.dot(c.o), -1, 1)),
+  };
+}
+
+function ellipseLimit(c, df, dO) {
+  const a = df >= 0 ? c.flex : c.ext, b = dO >= 0 ? c.abd : c.add;
+  const phi = Math.atan2(dO, df);
+  return (a * b) / Math.sqrt((b * Math.cos(phi)) ** 2 + (a * Math.sin(phi)) ** 2);
+}
+
+// Twist of a joint around its own axis, relative to the bind pose: { angle, twist (quaternion) }.
+function twistOf(c, q) {
+  const delta = _cq2.copy(c.qBindInv).multiply(q);
+  const ax = c.dLocal;
+  const proj = delta.x * ax.x + delta.y * ax.y + delta.z * ax.z;
+  const tw = new THREE.Quaternion(ax.x * proj, ax.y * proj, ax.z * proj, delta.w);
+  if (tw.lengthSq() < 1e-12) tw.identity(); else tw.normalize();
+  let angle = 2 * Math.atan2(proj, delta.w);
+  if (angle > Math.PI) angle -= 2 * Math.PI;
+  if (angle < -Math.PI) angle += 2 * Math.PI;
+  return { angle, twist: tw, delta };
+}
+
+// How far (degrees) a joint is past its limits. Doesn't change anything.
+function constraintExcess(bone) {
+  const c = pose.humanoid?.constraints.get(bone);
+  if (!c) return null;
+  const d = _cv1.copy(c.dLocal).applyQuaternion(bone.quaternion).normalize();
+  let swing;
+  if (c.hinge) {
+    const { bend, dev } = hingeAngles(c, d);
+    swing = Math.max(0, bend - c.flex, -c.ext - bend, Math.abs(dev) - c.lat);
+  } else {
+    const theta = Math.acos(THREE.MathUtils.clamp(d.dot(c.n), -1, 1));
+    swing = Math.max(0, theta - ellipseLimit(c, d.dot(c.f), d.dot(c.o)));
+  }
+  const twist = Math.max(0, Math.abs(twistOf(c, bone.quaternion).angle) - c.twist);
+  return { swing: swing / DEG, twist: twist / DEG };
+}
+
+// Clamp a bone's rotation into its natural range. Returns the correction angle (radians).
+function constrainBone(bone) {
+  if (!humanoidActive()) return 0;
+  const c = pose.humanoid.constraints.get(bone);
+  if (!c) return 0;
+  const q = bone.quaternion;
+  const before = _cq1.copy(q);
+
+  // Swing: hinges stay in their bend range and near their plane; ball joints stay inside an
+  // elliptical cone around their neutral direction.
+  const d = _cv1.copy(c.dLocal).applyQuaternion(q).normalize();
+  const df = d.dot(c.f), dO = d.dot(c.o);
+  const theta = Math.acos(THREE.MathUtils.clamp(d.dot(c.n), -1, 1));
+  if (c.hinge) {
+    const { bend, dev } = hingeAngles(c, d);
+    const b2 = THREE.MathUtils.clamp(bend, -c.ext, c.flex), v2 = THREE.MathUtils.clamp(dev, -c.lat, c.lat);
+    if (b2 !== bend || v2 !== dev) {
+      const dc = _cv2.copy(c.n).multiplyScalar(Math.cos(b2)).addScaledVector(c.f, Math.sin(b2))
+        .multiplyScalar(Math.cos(v2)).addScaledVector(c.o, Math.sin(v2)).normalize();
+      q.premultiply(_cq3.setFromUnitVectors(d, dc));
+    }
+  } else if (theta > 1e-4) {
+    const maxT = ellipseLimit(c, df, dO);
+    if (theta > maxT) {
+      const phi = Math.atan2(dO, df);
+      const dc = _cv2.copy(c.n).multiplyScalar(Math.cos(maxT))
+        .addScaledVector(c.f, Math.cos(phi) * Math.sin(maxT))
+        .addScaledVector(c.o, Math.sin(phi) * Math.sin(maxT))
+        .normalize();
+      q.premultiply(_cq3.setFromUnitVectors(d, dc));
+    }
+  }
+
+  // Twist: around the bone's own axis, relative to the bind pose.
+  const { angle, twist, delta } = twistOf(c, q);
+  if (Math.abs(angle) > c.twist) {
+    const swing = _cq4.copy(delta).multiply(twist.invert());
+    const clamped = new THREE.Quaternion().setFromAxisAngle(c.dLocal, Math.sign(angle) * c.twist);
+    q.copy(c.qBind).multiply(swing).multiply(clamped);
+  }
+  q.normalize();
+  bone.updateMatrixWorld(true);
+  const change = before.angleTo(q);
+  if (change > 0.5 * DEG) pose.limitHit = true;
+  return change;
+}
+
+// Keep a foot at a fixed orientation (stored relative to the model), within ankle limits.
+function lockFoot(job) {
+  if (!job.lockQ || !job.lockBone) return;
+  const foot = job.lockBone;
+  const desired = modelRoot.getWorldQuaternion(new THREE.Quaternion()).multiply(job.lockQ);
+  const parentQ = foot.parent.getWorldQuaternion(new THREE.Quaternion());
+  foot.quaternion.copy(parentQ.invert().multiply(desired));
+  foot.updateMatrixWorld(true);
+  constrainBone(foot);
+}
+
+// Model-relative orientation lock for the foot when posing a leg by its foot (or toes).
+function footLockFor(bone) {
+  const limb = pose.humanoid?.limbEnd.get(bone);
+  if (!limb || limb.kind !== "leg") return {};
+  const footQ = limb.end.getWorldQuaternion(new THREE.Quaternion());
+  const rootQ = modelRoot.getWorldQuaternion(new THREE.Quaternion());
+  return { lockBone: limb.end, lockQ: rootQ.invert().multiply(footQ) };
+}
+
+// Exact two-segment solve: set the knee/elbow bend from the distance to the target (within
+// its hinge range, in its natural plane), then swing the hip/shoulder to aim at the target.
+function twoBone(limb, job) {
+  const { upper, mid, end } = limb;
+  const c = pose.humanoid.constraints.get(mid);
+  if (!c) return;
+  const a = new THREE.Vector3().setFromMatrixPosition(upper.matrixWorld);
+  const bp = new THREE.Vector3().setFromMatrixPosition(mid.matrixWorld);
+  const cp = new THREE.Vector3().setFromMatrixPosition(end.matrixWorld);
+  const offset = job.effector().clone().sub(cp);
+  const tc = job.target.clone().sub(offset);
+  const L1 = a.distanceTo(bp), L2 = bp.distanceTo(cp);
+  if (L1 < 1e-6 || L2 < 1e-6) return;
+  const D = THREE.MathUtils.clamp(a.distanceTo(tc), Math.abs(L1 - L2) + 1e-6, L1 + L2 - 1e-6);
+  const cosG = THREE.MathUtils.clamp((L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2), -1, 1);
+  const beta = THREE.MathUtils.clamp(Math.PI - Math.acos(cosG), -c.ext, c.flex);
+
+  // Bend the middle joint: its axis = neutral rotated by beta toward the flex direction.
+  const { twist } = twistOf(c, mid.quaternion);
+  const twistKeep = twist.clone();
+  const bindDir = c.dLocal.clone().applyQuaternion(c.qBind);
+  const desired = c.n.clone().multiplyScalar(Math.cos(beta)).addScaledVector(c.f, Math.sin(beta)).normalize();
+  const align = new THREE.Quaternion().setFromUnitVectors(bindDir, desired);
+  mid.quaternion.copy(align).multiply(c.qBind).multiply(twistKeep).normalize();
+  mid.updateMatrixWorld(true);
+  constrainBone(mid);
+  lockFoot(job);
+
+  // Swing the upper joint so the end (plus the grabbed point's offset) lands on the target.
+  const c2 = new THREE.Vector3().setFromMatrixPosition(end.matrixWorld);
+  const tc2 = job.target.clone().sub(job.effector().clone().sub(c2));
+  const v1 = c2.sub(a), v2 = tc2.sub(a);
+  if (v1.lengthSq() > 1e-12 && v2.lengthSq() > 1e-12) {
+    rotateBoneWorld(upper, new THREE.Quaternion().setFromUnitVectors(v1.normalize(), v2.normalize()));
+    constrainBone(upper);
+  }
+  lockFoot(job);
+}
+
+// Move the hips (skeleton root) so the grabbed point follows the target; pinned feet re-solve.
+function translateRoot(job) {
+  const hips = job.bone;
+  const delta = job.target.clone().sub(job.effector());
+  const p = new THREE.Vector3().setFromMatrixPosition(hips.matrixWorld).add(delta);
+  hips.position.copy(hips.parent.worldToLocal(p));
+  hips.updateMatrixWorld(true);
+}
+
+// The bones a grab bends. Humanoid arms/legs grabbed at the hand or foot bend the elbow+shoulder
+// or knee+hip together (then the collarbone and spine, for longer chains).
+function posingChain(bone, n, blocked) {
+  const H = humanoidActive() ? pose.humanoid : null;
+  const limb = H?.limbEnd.get(bone);
+  if (limb && n >= 2 && !blocked?.has(limb.mid) && !blocked?.has(limb.upper)) {
+    const chain = [limb.mid, limb.upper];
+    for (let b = limb.upper.parent; chain.length < n && b && pose.rig.set.has(b) && !pose.rig.isRoot(b) && !blocked?.has(b); b = b.parent) chain.push(b);
+    return chain;
+  }
+  return chainFor(bone, n, blocked);
+}
+
+// Solve one grab or pin: { bone, effector(), target, chainLen, blocked, lockBone?, lockQ? }
+function solveJob(job, iterations, tol) {
+  if (job.effector().distanceTo(job.target) < tol && !job.lockQ) return;
+  const chain = posingChain(job.bone, job.chainLen, job.blocked);
+  if (!chain.length) return;
+  const H = humanoidActive() ? pose.humanoid : null;
+  if (!H) { ccd(chain, job.effector, job.target, iterations, tol); return; }
+  if (job.bone === H.hips && chain[0] === H.hips) { translateRoot(job); return; }
+  const limb = H.limbEnd.get(job.bone);
+  if (limb && chain[0] === limb.mid) {
+    const extra = chain.slice(2);
+    for (let it = 0; it < 3; it++) {
+      if (extra.length) ccd(extra, job.effector, job.target, 1, tol, true);
+      lockFoot(job);
+      twoBone(limb, job);
+      if (job.effector().distanceTo(job.target) < tol) break;
+    }
+    if (job.effector().distanceTo(job.target) > tol) {
+      ccd(chain, job.effector, job.target, 2, tol, true);
+      lockFoot(job);
+    }
+    return;
+  }
+  ccd(chain, job.effector, job.target, iterations, tol, true);
+}
+
 function solvePose(grabs) {
   const tol = modelWorldSize() * 0.001;
   const blocked = new Set();
   const targets = grabs.map((g) => modelRoot.localToWorld(g.targetLocal.clone()));
+  const constrain = humanoidActive();
+  pose.limitHit = false;
 
   if (grabs.length === 2) {
     const [g1, g2] = grabs;
@@ -1289,35 +1756,45 @@ function solvePose(grabs) {
             limitRotation(q, POSE.maxStepAngle * spine.length);
             part.identity().slerp(q, 1 / spine.length);
             // Spread the turn over the shared bones, top first, like a real back bending.
-            for (let i = spine.length - 1; i >= 0; i--) rotateBoneWorld(spine[i], part);
+            for (let i = spine.length - 1; i >= 0; i--) {
+              rotateBoneWorld(spine[i], part);
+              if (constrain) constrainBone(spine[i]);
+            }
           }
-          ccd(spine, midEff, midTarget, 1, tol); // lean toward where the two hands moved
+          ccd(spine, midEff, midTarget, 1, tol, constrain); // lean toward where the two hands moved
         }
       }
       for (let b = L; b && pose.rig.set.has(b); b = b.parent) blocked.add(b);
     }
   }
 
+  const jobs = grabs.map((g, i) => ({
+    bone: g.bone, effector: grabEffector(g), target: targets[i], chainLen: pose.chainLen, blocked,
+    lockBone: g.lockBone, lockQ: g.lockQ,
+  }));
+
   // Bones driven by active grabs; pins may not use these.
-  const activeChains = grabs.map((g) => chainFor(g.bone, pose.chainLen, blocked));
-  const activeBones = new Set(activeChains.flat());
+  const activeBones = new Set(jobs.flatMap((j) => posingChain(j.bone, j.chainLen, blocked)));
   for (const g of grabs) for (let b = g.bone; b && pose.rig.set.has(b); b = b.parent) activeBones.add(b);
+  const pinBlocked = new Set([...activeBones, ...blocked]);
 
   const pinJobs = pose.pins
     .filter((p) => !grabs.some((g) => g.bone === p.bone))
     .map((p) => {
       const out = new THREE.Vector3();
       return {
-        chain: chainFor(p.bone, POSE.defaultChain, new Set([...activeBones, ...blocked])),
-        effector: () => p.bone.localToWorld(out.copy(p.local)),
-        target: modelRoot.localToWorld(p.target.clone()),
+        bone: p.bone, effector: () => p.bone.localToWorld(out.copy(p.local)),
+        target: modelRoot.localToWorld(p.target.clone()), chainLen: POSE.defaultChain, blocked: pinBlocked,
+        lockBone: p.lockBone, lockQ: p.lockQ,
       };
     })
-    .filter((job) => job.chain.length);
+    .filter((job) => posingChain(job.bone, job.chainLen, job.blocked).length);
 
+  const converged = () => [...jobs, ...pinJobs].every((j) => j.effector().distanceTo(j.target) < tol * 2);
   for (let pass = 0; pass < 3; pass++) {
-    grabs.forEach((g, i) => ccd(activeChains[i], grabEffector(g), targets[i], POSE.ccdIterations, tol));
-    for (const job of pinJobs) ccd(job.chain, job.effector, job.target, 2, tol);
+    for (const job of jobs) solveJob(job, POSE.ccdIterations, tol);
+    for (const job of pinJobs) solveJob(job, 2, tol);
+    if (converged()) break;
   }
 }
 
@@ -1343,7 +1820,9 @@ function beginPoseGrab(h) {
 // A grab on a picked point of a bone (shared by controllers and the mouse).
 function makeGrab(hit) {
   stopAnimationForPosing();
+  modelRoot.updateMatrixWorld(true);
   return {
+    ...(humanoidActive() ? footLockFor(hit.bone) : {}),
     bone: hit.bone,
     local: hit.bone.worldToLocal(hit.point.clone()),
     startLocal: modelRoot.worldToLocal(hit.point.clone()),
@@ -1351,6 +1830,14 @@ function makeGrab(hit) {
     t0: performance.now(),
     moved: false,
     snap: snapshotPose(),
+  };
+}
+
+function makePin(bone, local) {
+  modelRoot.updateMatrixWorld(true);
+  return {
+    bone, local: local.clone(), target: modelRoot.worldToLocal(bone.localToWorld(local.clone())),
+    ...(humanoidActive() ? footLockFor(bone) : {}),
   };
 }
 
@@ -1384,13 +1871,13 @@ function finishGrab(g) {
       // Tap: toggle a pin on this part.
       pushUndo(g.snap);
       if (idx >= 0) pose.pins.splice(idx, 1);
-      else pose.pins.push({ bone: g.bone, local: g.local.clone(), target: modelRoot.worldToLocal(g.bone.localToWorld(g.local.clone())) });
+      else pose.pins.push(makePin(g.bone, g.local));
       result = "tap";
     }
   } else {
     // Dragged: the part stays pinned where it was left.
     if (idx >= 0) pose.pins.splice(idx, 1);
-    pose.pins.push({ bone: g.bone, local: g.local.clone(), target: modelRoot.worldToLocal(g.bone.localToWorld(g.local.clone())) });
+    pose.pins.push(makePin(g.bone, g.local));
     result = "drag";
   }
   updatePoseUi();
@@ -1422,7 +1909,13 @@ function updatePosing() {
     g.targetLocal.copy(g.startLocal).add(ctrlLocal.sub(g.ctrlStartLocal));
     grabs.push(g);
   }
-  if (grabs.length) solvePose(grabs);
+  if (grabs.length) {
+    const wasLimited = pose.limitHit;
+    solvePose(grabs);
+    if (pose.limitHit && !wasLimited) for (const h of hands) if (h.poseGrab) pulse(h, 0.6, 30);
+  } else {
+    pose.limitHit = false;
+  }
 }
 
 // ----- Pose visuals: pointer rays, hover/grab marker, the joints that will bend, pins -----
@@ -1450,10 +1943,10 @@ function hidePoseVisuals() {
 }
 function showPoseMarker(i, bone, point, grabbing) {
   const hover = poseVis.hover[i];
-  hover.material.color.setHex(grabbing ? 0xffd34f : 0x4fb3ff);
+  hover.material.color.setHex(grabbing ? (pose.limitHit ? 0xff5a5a : 0xffd34f) : 0x4fb3ff);
   hover.visible = !!point;
   if (point) hover.position.copy(point);
-  const chain = bone ? chainFor(bone, pose.chainLen) : [];
+  const chain = bone ? posingChain(bone, pose.chainLen) : [];
   poseVis.chain[i].forEach((d, k) => {
     d.visible = k < chain.length;
     if (d.visible) d.position.setFromMatrixPosition(chain[k].matrixWorld);
@@ -1582,6 +2075,8 @@ function updateMousePosing() {
   if (mouse.grab?.moved) {
     modelRoot.updateMatrixWorld(true);
     solvePose([mouse.grab]);
+  } else if (!mouse.grab && !hands.some((h) => h.poseGrab)) {
+    pose.limitHit = false;
   }
 }
 
@@ -1759,7 +2254,7 @@ ui.floor.addEventListener("change", () => {
 });
 
 // Handy for debugging from the Quest browser's remote devtools (chrome://inspect)
-window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, anim, playClip, setPlaying, pose, mouse, camera, orbit, handleXRInput, pickBone, undoPose, redoPose, resetPose, get current() { return current; } };
+window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, anim, playClip, setPlaying, pose, mouse, camera, orbit, handleXRInput, pickBone, constraintExcess, settings, undoPose, redoPose, resetPose, get current() { return current; } };
 </script>
 </body>
 </html>
