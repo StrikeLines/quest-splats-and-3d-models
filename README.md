@@ -16,10 +16,25 @@ Built with [three.js](https://threejs.org) and [Spark](https://sparkjs.dev). Spa
 | --- | --- |
 | Grip (one hand) | Grab space and push, pull or slide the model |
 | Grip (both hands) | Spread apart to zoom in, bring together to zoom out, turn like a steering wheel to rotate |
-| A or X | Reset the model in front of you |
+| A or X | Reset the model in front of you. Hold for 1 second to reset the pose. |
 | B or Y | Leave VR and return to the file picker |
-| Trigger | Play or pause the animation (animated models) |
-| Thumbstick left / right | Previous / next animation, if the model has several |
+| Thumbstick press | Play or pause the animation |
+| Thumbstick left / right | Undo / redo the pose (on models that can't be posed: previous / next animation) |
+
+### Posing rigged models
+
+Any model with a skeleton can be posed. The viewer works from the bone hierarchy alone, so bone names and rig conventions don't matter.
+
+| Input | Action |
+| --- | --- |
+| Trigger + drag | Point at a body part and drag it. The joints above it bend to follow, for example dragging a foot bends the knee and hip. The part stays pinned where you leave it. |
+| Both triggers | Pose two parts at once. Grab both shoulders and push one forward, pull the other back, and the torso twists, with the turn spread along the spine. |
+| Trigger tap | Pin or unpin a part without moving it. Pinned parts hold still while you pose the rest. |
+| Thumbstick up / down | More / fewer joints bend when you drag (1–8, default 3) |
+
+While you point, a dot shows the part you'd grab and small dots mark the joints that will bend. Orange dots are pins. Posing pauses any playing animation; pressing play hands control back to the animation. The 2D page also has Undo, Redo, Reset pose and Clear pins buttons.
+
+This is generic inverse kinematics: it doesn't know a knee from an elbow, so a joint can occasionally bend the wrong way. Undo, or drag it back.
 
 ## Formats
 

@@ -66,6 +66,11 @@
   #anim-panel[hidden] { display: none; }
   #anim-panel .btn.secondary { width: auto; flex: 1; min-height: 44px; }
   #anim-clip { flex: 1; min-width: 0; }
+  #pose-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
+  #pose-panel[hidden] { display: none; }
+  .pose-buttons { flex-wrap: wrap; gap: 8px; }
+  .pose-buttons .btn.secondary { width: auto; flex: 1 1 40%; min-height: 44px; font-size: 15px; }
+  .btn.secondary:disabled { opacity: .4; cursor: default; }
 </style>
 <script type="importmap">
 {
@@ -98,12 +103,31 @@
     <table class="controls">
       <tr><td>Grip (one hand)</td><td>Grab space and push, pull or slide the model</td></tr>
       <tr><td>Grip (both hands)</td><td>Spread apart to zoom in, bring together to zoom out, turn like a steering wheel to rotate</td></tr>
-      <tr><td>A or X</td><td>Reset the model in front of you</td></tr>
+      <tr><td>A or X</td><td>Reset the model in front of you. Hold for 1 second to reset the pose.</td></tr>
       <tr><td>B or Y</td><td>Leave VR and return to this page</td></tr>
-      <tr><td>Trigger</td><td>Play or pause the animation (animated models)</td></tr>
-      <tr><td>Thumbstick left / right</td><td>Previous / next animation, if the model has several</td></tr>
+      <tr><td>Thumbstick press</td><td>Play or pause the animation</td></tr>
+    </table>
+    <p class="formats" style="margin-top:14px">Rigged models (posing):</p>
+    <table class="controls">
+      <tr><td>Trigger + drag</td><td>Point at a body part and drag it; the joints above it bend to follow. It stays pinned where you leave it.</td></tr>
+      <tr><td>Both triggers</td><td>Pose two parts at once, e.g. grab both shoulders and push one, pull the other to twist the torso</td></tr>
+      <tr><td>Trigger tap</td><td>Pin or unpin a part without moving it</td></tr>
+      <tr><td>Thumbstick up / down</td><td>More / fewer joints bend when you drag</td></tr>
+      <tr><td>Thumbstick left / right</td><td>Undo / redo (on models that can't be posed: previous / next animation)</td></tr>
     </table>
   </details>
+
+  <div id="pose-panel" hidden>
+    <div class="row">
+      <label>Pose<small id="pose-info"></small></label>
+    </div>
+    <div class="row pose-buttons">
+      <button class="btn secondary" id="pose-undo" type="button">Undo</button>
+      <button class="btn secondary" id="pose-redo" type="button">Redo</button>
+      <button class="btn secondary" id="pose-reset" type="button">Reset pose</button>
+      <button class="btn secondary" id="pose-unpin" type="button">Clear pins</button>
+    </div>
+  </div>
 
   <div id="anim-panel" hidden>
     <div class="row">
@@ -196,10 +220,23 @@ const QUALITY = {
   balanced:    { lodSplatScale: 1.0, framebufferScale: 0.7 },
   detail:      { lodSplatScale: 1.5, framebufferScale: 1.0 },
 };
-const BUTTON = { trigger: 0, grip: 1, ax: 4, by: 5 };
-const STICK_X = 2;               // xr-standard gamepad: axes[2] is the thumbstick's left/right
-const STICK_FLICK = 0.7;         // how far to push the stick to step to the next/previous animation
+const BUTTON = { trigger: 0, grip: 1, stick: 3, ax: 4, by: 5 };
+const STICK_X = 2;               // xr-standard gamepad: axes[2]/[3] are the thumbstick's x/y (up is negative)
+const STICK_Y = 3;
+const STICK_FLICK = 0.7;         // how far to push the stick to count as a flick
 const STICK_RELEASE = 0.3;
+const LONG_PRESS_MS = 1000;      // hold A/X this long to reset the pose
+const POSE = {
+  defaultChain: 3,               // joints that bend when you drag a part (adjust with thumbstick up/down)
+  minChain: 1,
+  maxChain: 8,
+  spineBones: 3,                 // how many bones share a two-hand twist/lean
+  ccdIterations: 6,
+  maxStepAngle: 0.5,             // radians a joint may turn per solver step (keeps motion smooth)
+  tapMs: 350,                    // a trigger press shorter than this, without moving, is a tap (pin toggle)
+  tapMove: 0.01,                 // meters
+  undoLimit: 60,
+};
 
 // ---------------------------------------------------------------------------
 // Settings (persisted when storage is available)
@@ -248,6 +285,12 @@ const ui = {
   animClip: $("anim-clip"),
   animPlay: $("anim-play"),
   animSpeed: $("anim-speed"),
+  posePanel: $("pose-panel"),
+  poseInfo: $("pose-info"),
+  poseUndo: $("pose-undo"),
+  poseRedo: $("pose-redo"),
+  poseReset: $("pose-reset"),
+  poseUnpin: $("pose-unpin"),
 };
 
 ui.mode.value = settings.mode;
@@ -522,6 +565,7 @@ function disposeObject(obj) {
 function clearModel() {
   if (!current) return;
   clearAnimations();
+  clearPosing();
   modelRoot.clear();
   disposeObject(current.object);
   current = null;
@@ -681,7 +725,10 @@ async function openFile(file) {
 
     const fitScale = mountModel(object, kind);
     current = { kind, object, name: file.name, fitScale };
-    if (kind === "mesh") setupAnimations(object, animations);
+    if (kind === "mesh") {
+      setupAnimations(object, animations);
+      setupPosing(object);
+    }
     modelRoot.position.copy(DESKTOP_HOME);
     modelRoot.quaternion.identity();
     modelRoot.scale.setScalar(fitScale);
@@ -690,7 +737,8 @@ async function openFile(file) {
 
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const count = kind === "splat" && object.numSplats ? ` · ${object.numSplats.toLocaleString()} splats` : "";
-    const animNote = anim.clips.length ? ` · ${anim.clips.length} animation${anim.clips.length > 1 ? "s" : ""}` : "";
+    const animNote = (anim.clips.length ? ` · ${anim.clips.length} animation${anim.clips.length > 1 ? "s" : ""}` : "") +
+      (pose.rig ? " · posable" : "");
     setProgress(null);
     setStatus(`Loaded ${file.name}${count}${animNote} in ${secs}s.`);
     await enterXR({ auto: true });
@@ -773,6 +821,8 @@ function onSessionEnd() {
   scene.background = BG_COLOR;
   floorGrid.visible = settings.floor;
   endGrab();
+  for (const h of hands) if (h.poseGrab) endPoseGrab(h);
+  hidePoseVisuals();
   if (current) {
     ui.enterBtn.hidden = false;
     ui.enterBtn.textContent = pickMode() === "immersive-ar" ? "Re-enter Passthrough" : "Re-enter VR";
@@ -799,9 +849,28 @@ const hands = [0, 1].map((i) => {
   );
   grip.add(marker);
   scene.add(grip);
-  const hand = { index: i, grip, marker, source: null, prev: [], gripping: false, stickArmed: true };
+
+  // Pointer ray (target-ray space) used for picking body parts on rigged models
+  const ray = renderer.xr.getController(i);
+  const rayLine = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0x4fb3ff, transparent: true, opacity: 0.55 }),
+  );
+  rayLine.visible = false;
+  rayLine.frustumCulled = false;
+  ray.add(rayLine);
+  scene.add(ray);
+
+  const hand = {
+    index: i, grip, marker, ray, rayLine, source: null, prev: [], gripping: false,
+    stickArmed: true, poseGrab: null, axDownAt: 0, axLongFired: false,
+  };
   grip.addEventListener("connected", (e) => { hand.source = e.data; hand.prev = []; });
-  grip.addEventListener("disconnected", () => { hand.source = null; hand.gripping = false; hand.prev = []; rebase(); });
+  grip.addEventListener("disconnected", () => {
+    hand.source = null; hand.gripping = false; hand.prev = [];
+    if (hand.poseGrab) endPoseGrab(hand);
+    rebase();
+  });
   return hand;
 });
 
@@ -951,6 +1020,432 @@ function resetModel() {
 }
 
 // ---------------------------------------------------------------------------
+// Posing rigged models with the triggers
+// ---------------------------------------------------------------------------
+// Works from the bone hierarchy alone, so it applies to any rigged model:
+//  - pick: the controller ray selects the bone segment (joint -> child joint) closest to it
+//  - drag: a point on that bone follows the controller; CCD inverse kinematics bends the
+//          bone and the joints above it (chain length is adjustable)
+//  - two hands: the twist/lean between the two grabbed points is applied to the bones
+//          they share (their common ancestor and a few above it, e.g. the spine), then
+//          each limb is solved on its own
+//  - pins: parts you placed stay put while you pose the rest
+const pose = {
+  rig: null,              // { bones, set, isRoot, children, rest }
+  chainLen: POSE.defaultChain,
+  pins: [],               // { bone, local: Vector3 (bone space), target: Vector3 (modelRoot space) }
+  undo: [],
+  redo: [],
+};
+const _pv = Array.from({ length: 10 }, () => new THREE.Vector3());
+const _pq = new THREE.Quaternion(), _pq2 = new THREE.Quaternion(), _pqI = new THREE.Quaternion();
+const _ray = new THREE.Ray();
+
+function buildRig(object) {
+  const set = new Set();
+  object.traverse((o) => {
+    if (o.isSkinnedMesh && o.skeleton) for (const b of o.skeleton.bones) if (b) set.add(b);
+  });
+  if (!set.size) return null;
+  const bones = [...set];
+  const isRoot = (b) => !(b.parent && b.parent.isBone && set.has(b.parent));
+  const children = new Map(bones.map((b) => [b, b.children.filter((c) => c.isBone && set.has(c))]));
+  const rig = { bones, set, isRoot, children };
+  rig.rest = snapshotBones(rig);
+  return rig;
+}
+
+function snapshotBones(rig = pose.rig) {
+  return rig.bones.map((b) => [b.position.clone(), b.quaternion.clone(), b.scale.clone()]);
+}
+function snapshotPose() {
+  return {
+    bones: snapshotBones(),
+    pins: pose.pins.map((p) => ({ bone: p.bone, local: p.local.clone(), target: p.target.clone() })),
+  };
+}
+function applyBones(snap) {
+  pose.rig.bones.forEach((b, i) => {
+    b.position.copy(snap[i][0]);
+    b.quaternion.copy(snap[i][1]);
+    b.scale.copy(snap[i][2]);
+  });
+  modelRoot.updateMatrixWorld(true);
+}
+function applySnapshot(s) {
+  applyBones(s.bones);
+  pose.pins = s.pins.map((p) => ({ bone: p.bone, local: p.local.clone(), target: p.target.clone() }));
+}
+function pushUndo(snap) {
+  pose.undo.push(snap);
+  if (pose.undo.length > POSE.undoLimit) pose.undo.shift();
+  pose.redo.length = 0;
+  updatePoseUi();
+}
+function stopAnimationForPosing() {
+  // A playing animation would overwrite the pose every frame.
+  if (anim.playing) setPlaying(false);
+}
+function undoPose() {
+  if (!pose.rig || !pose.undo.length) return false;
+  stopAnimationForPosing();
+  pose.redo.push(snapshotPose());
+  applySnapshot(pose.undo.pop());
+  updatePoseUi();
+  return true;
+}
+function redoPose() {
+  if (!pose.rig || !pose.redo.length) return false;
+  stopAnimationForPosing();
+  pose.undo.push(snapshotPose());
+  applySnapshot(pose.redo.pop());
+  updatePoseUi();
+  return true;
+}
+function resetPose() {
+  if (!pose.rig) return;
+  stopAnimationForPosing();
+  pushUndo(snapshotPose());
+  applyBones(pose.rig.rest);
+  pose.pins = [];
+  updatePoseUi();
+}
+function clearPins() {
+  if (!pose.rig || !pose.pins.length) return;
+  pushUndo(snapshotPose());
+  pose.pins = [];
+  updatePoseUi();
+}
+
+function setupPosing(object) {
+  clearPosing();
+  pose.rig = buildRig(object);
+  if (!pose.rig) return;
+  pose.chainLen = POSE.defaultChain;
+  ui.posePanel.hidden = false;
+  updatePoseUi();
+}
+function clearPosing() {
+  for (const h of hands) h.poseGrab = null;
+  pose.rig = null;
+  pose.pins = [];
+  pose.undo = [];
+  pose.redo = [];
+  ui.posePanel.hidden = true;
+  hidePoseVisuals();
+}
+function updatePoseUi() {
+  if (!pose.rig) return;
+  const pins = pose.pins.length;
+  ui.poseInfo.textContent = `${pose.rig.bones.length} bones · ${pose.chainLen} joint${pose.chainLen > 1 ? "s" : ""} bend per drag` +
+    (pins ? ` · ${pins} pinned` : "");
+  ui.poseUndo.disabled = !pose.undo.length;
+  ui.poseRedo.disabled = !pose.redo.length;
+  ui.poseUnpin.disabled = !pins;
+}
+ui.poseUndo.addEventListener("click", () => undoPose());
+ui.poseRedo.addEventListener("click", () => redoPose());
+ui.poseReset.addEventListener("click", () => resetPose());
+ui.poseUnpin.addEventListener("click", () => clearPins());
+
+// Size of the model in world units, used to scale pick distances and tolerances.
+function modelWorldSize() {
+  return current ? FIT_SIZE * (modelRoot.scale.x / current.fitScale) : 1;
+}
+
+// Find the bone segment closest to a ray. Returns { bone, point (world), t } or null.
+function pickBone(origin, dir) {
+  const rig = pose.rig;
+  if (!rig) return null;
+  _ray.set(origin, dir);
+  const size = modelWorldSize();
+  const maxDist = THREE.MathUtils.clamp(size * 0.06, 0.015, 0.12);
+  let best = null;
+  const p0 = _pv[0], p1 = _pv[1], onRay = _pv[2], onSeg = _pv[3];
+  for (const b of rig.bones) {
+    p0.setFromMatrixPosition(b.matrixWorld);
+    const kids = rig.children.get(b);
+    const ends = kids.length ? kids : [null];
+    for (const k of ends) {
+      if (k) p1.setFromMatrixPosition(k.matrixWorld); else p1.copy(p0);
+      const d = Math.sqrt(_ray.distanceSqToSegment(p0, p1, onRay, onSeg));
+      const t = onRay.clone().sub(origin).dot(dir);
+      if (t < 0 || d > maxDist) continue;
+      const score = d + t * 0.03; // prefer what's nearer along the ray (the front of the body)
+      if (!best || score < best.score) best = { bone: b, point: onSeg.clone(), t, score };
+    }
+  }
+  return best;
+}
+
+// Bones that bend for a grab on `bone`: the bone itself and its ancestors, up to `n`,
+// never the skeleton root (unless it's the grabbed bone), never anything in `blocked`.
+function chainFor(bone, n, blocked) {
+  const rig = pose.rig;
+  const chain = [];
+  for (let b = bone; b && rig.set.has(b) && chain.length < n; b = b.parent) {
+    if (blocked && blocked.has(b)) break;
+    if (rig.isRoot(b) && chain.length > 0) break;
+    chain.push(b);
+    if (rig.isRoot(b)) break;
+  }
+  return chain;
+}
+
+function commonAncestor(a, b) {
+  const anc = new Set();
+  for (let x = a; x; x = x.parent) anc.add(x);
+  for (let y = b; y; y = y.parent) if (anc.has(y) && pose.rig.set.has(y)) return y;
+  return null;
+}
+
+// Rotate a bone about its own origin by a world-space rotation q.
+function rotateBoneWorld(bone, q) {
+  bone.parent.getWorldQuaternion(_pq2);
+  const local = _pq.copy(_pq2).invert().multiply(q).multiply(_pq2);
+  bone.quaternion.premultiply(local).normalize();
+  bone.updateMatrixWorld(true);
+}
+
+function limitRotation(q, maxAngle) {
+  const angle = 2 * Math.acos(Math.min(1, Math.abs(q.w)));
+  if (angle > maxAngle) q.copy(_pqI.identity().slerp(q, maxAngle / angle));
+  return q;
+}
+
+// Cyclic coordinate descent IK: turn each joint (nearest the effector first) to point
+// the effector at the target.
+function ccd(chain, effector, target, iterations, tol) {
+  const j = _pv[4], v1 = _pv[5], v2 = _pv[6], q = new THREE.Quaternion();
+  for (let it = 0; it < iterations; it++) {
+    for (const bone of chain) {
+      j.setFromMatrixPosition(bone.matrixWorld);
+      v1.copy(effector()).sub(j);
+      v2.copy(target).sub(j);
+      if (v1.lengthSq() < 1e-12 || v2.lengthSq() < 1e-12) continue;
+      q.setFromUnitVectors(v1.normalize(), v2.normalize());
+      limitRotation(q, POSE.maxStepAngle);
+      rotateBoneWorld(bone, q);
+    }
+    if (effector().distanceTo(target) < tol) break;
+  }
+}
+
+function grabEffector(g) {
+  const out = new THREE.Vector3();
+  return () => g.bone.localToWorld(out.copy(g.local));
+}
+
+function solvePose(grabs) {
+  const tol = modelWorldSize() * 0.001;
+  const blocked = new Set();
+  const targets = grabs.map((g) => modelRoot.localToWorld(g.targetLocal.clone()));
+
+  if (grabs.length === 2) {
+    const [g1, g2] = grabs;
+    const L = commonAncestor(g1.bone, g2.bone);
+    if (L && L !== g1.bone && L !== g2.bone) {
+      // Shared bones (e.g. the spine for two shoulders): twist/lean them first.
+      const spine = [];
+      for (let b = L; b && pose.rig.set.has(b) && !pose.rig.isRoot(b) && spine.length < POSE.spineBones; b = b.parent) spine.push(b);
+      if (spine.length) {
+        const e1 = grabEffector(g1), e2 = grabEffector(g2);
+        const mid = new THREE.Vector3();
+        const midEff = () => mid.copy(e1()).add(e2()).multiplyScalar(0.5);
+        const midTarget = targets[0].clone().add(targets[1]).multiplyScalar(0.5);
+        const q = new THREE.Quaternion(), part = new THREE.Quaternion();
+        for (let it = 0; it < 2; it++) {
+          const a = _pv[7].copy(e2()).sub(e1());
+          const b = _pv[8].copy(targets[1]).sub(targets[0]);
+          if (a.lengthSq() > 1e-12 && b.lengthSq() > 1e-12) {
+            q.setFromUnitVectors(a.normalize(), b.normalize());
+            limitRotation(q, POSE.maxStepAngle * spine.length);
+            part.identity().slerp(q, 1 / spine.length);
+            // Spread the turn over the shared bones, top first, like a real back bending.
+            for (let i = spine.length - 1; i >= 0; i--) rotateBoneWorld(spine[i], part);
+          }
+          ccd(spine, midEff, midTarget, 1, tol); // lean toward where the two hands moved
+        }
+      }
+      for (let b = L; b && pose.rig.set.has(b); b = b.parent) blocked.add(b);
+    }
+  }
+
+  // Bones driven by active grabs; pins may not use these.
+  const activeChains = grabs.map((g) => chainFor(g.bone, pose.chainLen, blocked));
+  const activeBones = new Set(activeChains.flat());
+  for (const g of grabs) for (let b = g.bone; b && pose.rig.set.has(b); b = b.parent) activeBones.add(b);
+
+  const pinJobs = pose.pins
+    .filter((p) => !grabs.some((g) => g.bone === p.bone))
+    .map((p) => {
+      const out = new THREE.Vector3();
+      return {
+        chain: chainFor(p.bone, POSE.defaultChain, new Set([...activeBones, ...blocked])),
+        effector: () => p.bone.localToWorld(out.copy(p.local)),
+        target: modelRoot.localToWorld(p.target.clone()),
+      };
+    })
+    .filter((job) => job.chain.length);
+
+  for (let pass = 0; pass < 3; pass++) {
+    grabs.forEach((g, i) => ccd(activeChains[i], grabEffector(g), targets[i], POSE.ccdIterations, tol));
+    for (const job of pinJobs) ccd(job.chain, job.effector, job.target, 2, tol);
+  }
+}
+
+function controllerRay(h, origin, dir) {
+  origin.setFromMatrixPosition(h.ray.matrixWorld);
+  dir.set(0, 0, -1).transformDirection(h.ray.matrixWorld);
+}
+
+function beginPoseGrab(h) {
+  modelRoot.updateMatrixWorld(true);
+  const origin = new THREE.Vector3(), dir = new THREE.Vector3();
+  controllerRay(h, origin, dir);
+  const hit = pickBone(origin, dir);
+  if (!hit) return false;
+  stopAnimationForPosing();
+  const ctrl = new THREE.Vector3().setFromMatrixPosition(h.grip.matrixWorld);
+  h.poseGrab = {
+    bone: hit.bone,
+    local: hit.bone.worldToLocal(hit.point.clone()),
+    startLocal: modelRoot.worldToLocal(hit.point.clone()),
+    targetLocal: modelRoot.worldToLocal(hit.point.clone()),
+    ctrlStartLocal: modelRoot.worldToLocal(ctrl.clone()),
+    ctrlStartWorld: ctrl,
+    t0: performance.now(),
+    moved: false,
+    snap: snapshotPose(),
+  };
+  pulse(h, 0.4, 25);
+  return true;
+}
+
+// A pin counts as "the same" if it sits near the tapped point, whichever bone was picked.
+function findPin(bone, local) {
+  const p = bone.localToWorld(local.clone());
+  const near = THREE.MathUtils.clamp(modelWorldSize() * 0.04, 0.01, 0.08);
+  let best = -1, bestD = Infinity;
+  pose.pins.forEach((pin, k) => {
+    const d = pin.bone.localToWorld(pin.local.clone()).distanceTo(p);
+    if (d < near && d < bestD) { best = k; bestD = d; }
+  });
+  return best;
+}
+
+function endPoseGrab(h) {
+  const g = h.poseGrab;
+  h.poseGrab = null;
+  if (!g || !pose.rig) return;
+  const elapsed = performance.now() - g.t0;
+  const idx = findPin(g.bone, g.local);
+  if (!g.moved) {
+    if (elapsed <= POSE.tapMs) {
+      // Tap: toggle a pin on this part.
+      pushUndo(g.snap);
+      if (idx >= 0) pose.pins.splice(idx, 1);
+      else pose.pins.push({ bone: g.bone, local: g.local.clone(), target: modelRoot.worldToLocal(g.bone.localToWorld(g.local.clone())) });
+      pulse(h, 0.3, 20);
+    }
+  } else {
+    // Dragged: the part stays pinned where it was left.
+    if (idx >= 0) pose.pins.splice(idx, 1);
+    pose.pins.push({ bone: g.bone, local: g.local.clone(), target: modelRoot.worldToLocal(g.bone.localToWorld(g.local.clone())) });
+  }
+  updatePoseUi();
+}
+
+function stepChainLength(delta) {
+  const next = THREE.MathUtils.clamp(pose.chainLen + delta, POSE.minChain, POSE.maxChain);
+  if (next === pose.chainLen) return false;
+  pose.chainLen = next;
+  updatePoseUi();
+  return true;
+}
+
+function updatePosing() {
+  if (!pose.rig) return;
+  modelRoot.updateMatrixWorld(true);
+  const grabs = [];
+  for (const h of hands) {
+    const g = h.poseGrab;
+    if (!g) continue;
+    const ctrl = _pv[9].setFromMatrixPosition(h.grip.matrixWorld);
+    if (!g.moved && ctrl.distanceTo(g.ctrlStartWorld) > POSE.tapMove) {
+      g.moved = true;
+      pushUndo(g.snap);
+    }
+    if (!g.moved) continue;
+    const ctrlLocal = modelRoot.worldToLocal(ctrl.clone());
+    g.targetLocal.copy(g.startLocal).add(ctrlLocal.sub(g.ctrlStartLocal));
+    grabs.push(g);
+  }
+  if (grabs.length) solvePose(grabs);
+}
+
+// ----- Pose visuals: pointer rays, hover/grab marker, the joints that will bend, pins -----
+function makeDot(color, radius) {
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 12, 8),
+    new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.9 }),
+  );
+  m.renderOrder = 999;
+  m.visible = false;
+  m.frustumCulled = false;
+  scene.add(m);
+  return m;
+}
+const poseVis = {
+  hover: hands.map(() => makeDot(0x4fb3ff, 0.012)),
+  chain: hands.map(() => Array.from({ length: POSE.maxChain }, () => makeDot(0xffffff, 0.007))),
+  pins: [],
+};
+function hidePoseVisuals() {
+  for (const h of hands) h.rayLine.visible = false;
+  for (const d of poseVis.hover) d.visible = false;
+  for (const set of poseVis.chain) for (const d of set) d.visible = false;
+  for (const d of poseVis.pins) d.visible = false;
+}
+function updatePoseVisuals() {
+  if (!pose.rig || !renderer.xr.isPresenting) { hidePoseVisuals(); return; }
+  modelRoot.updateMatrixWorld(true);
+  const origin = new THREE.Vector3(), dir = new THREE.Vector3();
+  hands.forEach((h, i) => {
+    const hover = poseVis.hover[i];
+    const dots = poseVis.chain[i];
+    let bone = null, point = null, rayLen = 1.0;
+    if (h.source && !h.gripping) {
+      if (h.poseGrab) {
+        bone = h.poseGrab.bone;
+        point = bone.localToWorld(h.poseGrab.local.clone());
+        hover.material.color.setHex(0xffd34f);
+      } else {
+        controllerRay(h, origin, dir);
+        const hit = pickBone(origin, dir);
+        if (hit) { bone = hit.bone; point = hit.point; rayLen = hit.t; }
+        hover.material.color.setHex(0x4fb3ff);
+      }
+    }
+    h.rayLine.visible = !!h.source && !h.gripping && !h.poseGrab;
+    h.rayLine.scale.z = Math.max(0.05, rayLen);
+    hover.visible = !!point;
+    if (point) hover.position.copy(point);
+    const chain = bone ? chainFor(bone, pose.chainLen) : [];
+    dots.forEach((d, k) => {
+      d.visible = k < chain.length;
+      if (d.visible) d.position.setFromMatrixPosition(chain[k].matrixWorld);
+    });
+  });
+  while (poseVis.pins.length < pose.pins.length) poseVis.pins.push(makeDot(0xff8a3d, 0.01));
+  poseVis.pins.forEach((d, k) => {
+    const p = pose.pins[k];
+    d.visible = !!p;
+    if (p) p.bone.localToWorld(d.position.copy(p.local));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame input handling
 // ---------------------------------------------------------------------------
 function pressedEdge(hand, idx) {
@@ -961,37 +1456,76 @@ function pressedEdge(hand, idx) {
   return { now, down: now && !before, up: !now && before };
 }
 
+// Returns "left" | "right" | "up" | "down" once per thumbstick flick.
+function stickFlick(h) {
+  const axes = h.source?.gamepad?.axes;
+  const x = axes?.[STICK_X] ?? 0, y = axes?.[STICK_Y] ?? 0;
+  const mag = Math.max(Math.abs(x), Math.abs(y));
+  if (!h.stickArmed && mag < STICK_RELEASE) h.stickArmed = true;
+  if (!h.stickArmed || mag < STICK_FLICK) return null;
+  h.stickArmed = false;
+  if (Math.abs(x) >= Math.abs(y)) return x > 0 ? "right" : "left";
+  return y > 0 ? "down" : "up";
+}
+
 function handleXRInput() {
   let changed = false;
-  let exit = false, reset = false;
+  let exit = false, resetPlacement = false, resetPoseNow = false;
+  const now = performance.now();
   for (const h of hands) {
     if (!h.source?.gamepad) continue;
+
+    // Grip: move / scale / rotate the whole model
     const g = pressedEdge(h, BUTTON.grip);
-    if (g.down) { h.gripping = true; changed = true; pulse(h); }
-    if (g.up) { h.gripping = false; changed = true; }
+    if (g.down && !h.poseGrab) { h.gripping = true; changed = true; pulse(h); }
+    if (g.up && h.gripping) { h.gripping = false; changed = true; }
     h.marker.material.opacity = h.gripping ? 0.9 : 0.35;
-    if (pressedEdge(h, BUTTON.ax).down) reset = true;
+
+    // A/X: tap resets placement, hold resets the pose
+    const ax = pressedEdge(h, BUTTON.ax);
+    if (ax.down) { h.axDownAt = now; h.axLongFired = false; }
+    if (ax.now && !h.axLongFired && pose.rig && now - h.axDownAt > LONG_PRESS_MS) {
+      h.axLongFired = true;
+      resetPoseNow = true;
+    }
+    if (ax.up && !h.axLongFired) resetPlacement = true;
+
     if (pressedEdge(h, BUTTON.by).down) exit = true;
 
-    // Animation controls: trigger toggles play/pause, thumbstick flick changes clip.
-    if (pressedEdge(h, BUTTON.trigger).down && anim.action) {
+    // Thumbstick press: play / pause
+    if (pressedEdge(h, BUTTON.stick).down && anim.action) {
       setPlaying(!anim.playing);
       pulse(h, 0.25, 20);
     }
-    const x = h.source.gamepad.axes?.[STICK_X] ?? 0;
-    if (!h.stickArmed && Math.abs(x) < STICK_RELEASE) h.stickArmed = true;
-    if (h.stickArmed && Math.abs(x) > STICK_FLICK) {
-      h.stickArmed = false;
-      if (anim.clips.length > 1) {
-        playClip(anim.index + (x > 0 ? 1 : -1));
-        pulse(h, 0.25, 20);
+
+    // Trigger: pose (rigged models)
+    const tr = pressedEdge(h, BUTTON.trigger);
+    if (tr.down && pose.rig && !h.gripping) beginPoseGrab(h);
+    if (tr.up && h.poseGrab) endPoseGrab(h);
+
+    // Thumbstick flicks
+    const flick = stickFlick(h);
+    if (flick) {
+      let acted = false;
+      if (pose.rig) {
+        if (flick === "up") acted = stepChainLength(+1);
+        else if (flick === "down") acted = stepChainLength(-1);
+        else if (flick === "left") acted = undoPose();
+        else if (flick === "right") acted = redoPose();
+      } else if ((flick === "left" || flick === "right") && anim.clips.length > 1) {
+        playClip(anim.index + (flick === "right" ? 1 : -1));
+        acted = true;
       }
+      if (acted) pulse(h, 0.25, 20);
     }
   }
   if (changed) rebase();
-  if (reset) { resetModel(); for (const h of hands) pulse(h, 0.2, 20); }
+  if (resetPlacement) { resetModel(); for (const h of hands) pulse(h, 0.2, 20); }
+  if (resetPoseNow) { resetPose(); for (const h of hands) pulse(h, 0.5, 60); }
   if (exit) { renderer.xr.getSession()?.end(); return; }
   applyGrab();
+  updatePosing();
+  updatePoseVisuals();
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,7 +1535,8 @@ renderer.setAnimationLoop((time) => {
   // Cap the step so a stall (e.g. entering VR) doesn't make the animation jump ahead.
   animTimer.update(time);
   const dt = Math.min(animTimer.getDelta(), 0.1);
-  if (anim.mixer) anim.mixer.update(dt);
+  // Only advance while playing: a paused mixer would still re-apply its frame and undo posing.
+  if (anim.mixer && anim.playing) anim.mixer.update(dt);
   if (renderer.xr.isPresenting) {
     for (const h of hands) h.grip.updateMatrixWorld(true);
     if (pendingReset) {
@@ -1052,7 +1587,7 @@ ui.floor.addEventListener("change", () => {
 });
 
 // Handy for debugging from the Quest browser's remote devtools (chrome://inspect)
-window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, anim, playClip, setPlaying, get current() { return current; } };
+window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, anim, playClip, setPlaying, pose, handleXRInput, pickBone, undoPose, redoPose, resetPose, get current() { return current; } };
 </script>
 </body>
 </html>
