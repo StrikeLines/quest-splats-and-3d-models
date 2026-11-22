@@ -32,6 +32,20 @@ Any model with a skeleton can be posed. The viewer works from the bone hierarchy
 | Trigger tap | Pin or unpin a part without moving it. Pinned parts hold still while you pose the rest. |
 | Thumbstick up / down | More / fewer joints bend when you drag (1–8, default 3) |
 
+#### With a mouse, in the 2D view
+
+You can also pose on a PC before entering VR, one part at a time:
+
+| Input | Action |
+| --- | --- |
+| Drag a body part | Pose it. It moves in a plane facing the camera and stays pinned where you leave it. |
+| Click a body part | Pin or unpin it |
+| Drag empty space | Orbit the camera (scroll to zoom, right-drag to pan) |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
+| `[` and `]` | Fewer / more joints bend per drag (or the − / + buttons in the panel) |
+
+The two-hand twist needs both controllers, so it's VR only.
+
 While you point, a dot shows the part you'd grab and small dots mark the joints that will bend. Orange dots are pins. Posing pauses any playing animation; pressing play hands control back to the animation. The 2D page also has Undo, Redo, Reset pose and Clear pins buttons.
 
 This is generic inverse kinematics: it doesn't know a knee from an elbow, so a joint can occasionally bend the wrong way. Undo, or drag it back.
