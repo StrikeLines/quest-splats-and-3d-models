@@ -62,6 +62,10 @@
   table.controls td:first-child { color: var(--accent); font-weight: 600; width: 44%; padding-right: 10px; }
   .formats { color: var(--muted); font-size: 12px; margin-top: 10px; }
   #model-name { font-weight: 600; color: var(--text); }
+  #anim-panel { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
+  #anim-panel[hidden] { display: none; }
+  #anim-panel .btn.secondary { width: auto; flex: 1; min-height: 44px; }
+  #anim-clip { flex: 1; min-width: 0; }
 </style>
 <script type="importmap">
 {
@@ -96,8 +100,27 @@
       <tr><td>Grip (both hands)</td><td>Spread apart to zoom in, bring together to zoom out, turn like a steering wheel to rotate</td></tr>
       <tr><td>A or X</td><td>Reset the model in front of you</td></tr>
       <tr><td>B or Y</td><td>Leave VR and return to this page</td></tr>
+      <tr><td>Trigger</td><td>Play or pause the animation (animated models)</td></tr>
+      <tr><td>Thumbstick left / right</td><td>Previous / next animation, if the model has several</td></tr>
     </table>
   </details>
+
+  <div id="anim-panel" hidden>
+    <div class="row">
+      <label for="anim-clip">Animation</label>
+      <select id="anim-clip"></select>
+    </div>
+    <div class="row">
+      <button class="btn secondary" id="anim-play" type="button">Pause</button>
+      <select id="anim-speed" aria-label="Playback speed">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>
+  </div>
 
   <details>
     <summary>Settings</summary>
@@ -174,6 +197,9 @@ const QUALITY = {
   detail:      { lodSplatScale: 1.5, framebufferScale: 1.0 },
 };
 const BUTTON = { trigger: 0, grip: 1, ax: 4, by: 5 };
+const STICK_X = 2;               // xr-standard gamepad: axes[2] is the thumbstick's left/right
+const STICK_FLICK = 0.7;         // how far to push the stick to step to the next/previous animation
+const STICK_RELEASE = 0.3;
 
 // ---------------------------------------------------------------------------
 // Settings (persisted when storage is available)
@@ -218,6 +244,10 @@ const ui = {
   oneHandRotate: $("opt-onehand-rotate"),
   upright: $("opt-upright"),
   floor: $("opt-floor"),
+  animPanel: $("anim-panel"),
+  animClip: $("anim-clip"),
+  animPlay: $("anim-play"),
+  animSpeed: $("anim-speed"),
 };
 
 ui.mode.value = settings.mode;
@@ -339,18 +369,22 @@ async function loadSplat(file, ext, onProgress) {
   return mesh;
 }
 
+// Returns { object, animations } for mesh formats.
 async function loadMesh(file, ext) {
+  const mesh = (object, animations = []) => ({ object, animations });
   switch (ext) {
     case "glb":
     case "gltf": {
       const data = ext === "glb" ? await file.arrayBuffer() : await file.text();
       const gltf = await gltfLoader.parseAsync(data, "");
-      return gltf.scene;
+      return mesh(gltf.scene, gltf.animations);
     }
     case "obj":
-      return new OBJLoader().parse(await file.text());
-    case "fbx":
-      return new FBXLoader().parse(await file.arrayBuffer(), "");
+      return mesh(new OBJLoader().parse(await file.text()));
+    case "fbx": {
+      const fbx = new FBXLoader().parse(await file.arrayBuffer(), "");
+      return mesh(fbx, fbx.animations);
+    }
     case "stl": {
       const geom = new STLLoader().parse(await file.arrayBuffer());
       geom.computeVertexNormals();
@@ -359,7 +393,7 @@ async function loadMesh(file, ext) {
         vertexColors: !!geom.hasColors,
         metalness: 0.1, roughness: 0.6,
       });
-      return new THREE.Mesh(geom, mat);
+      return mesh(new THREE.Mesh(geom, mat));
     }
     case "ply": {
       const geom = new PLYLoader().parse(await file.arrayBuffer());
@@ -369,24 +403,79 @@ async function loadMesh(file, ext) {
         const mat = new THREE.MeshStandardMaterial({
           color: hasColor ? 0xffffff : 0xb8c2cc, vertexColors: hasColor, metalness: 0.05, roughness: 0.7,
         });
-        return new THREE.Mesh(geom, mat);
+        return mesh(new THREE.Mesh(geom, mat));
       }
       geom.computeBoundingBox();
       const size = geom.boundingBox.getSize(new THREE.Vector3()).length();
       const mat = new THREE.PointsMaterial({
         size: size / 600, vertexColors: hasColor, color: hasColor ? 0xffffff : 0xcfd6dd, sizeAttenuation: true,
       });
-      return new THREE.Points(geom, mat);
+      return mesh(new THREE.Points(geom, mat));
     }
-    case "dae":
-      return new ColladaLoader().parse(await file.text(), "").scene;
+    case "dae": {
+      const collada = new ColladaLoader().parse(await file.text(), "");
+      return mesh(collada.scene, collada.animations ?? collada.scene.animations ?? []);
+    }
     case "3mf":
-      return new ThreeMFLoader().parse(await file.arrayBuffer());
+      return mesh(new ThreeMFLoader().parse(await file.arrayBuffer()));
     case "usdz":
-      return new USDZLoader().parse(await file.arrayBuffer());
+      return mesh(new USDZLoader().parse(await file.arrayBuffer()));
     default:
       throw new Error(`Unsupported file type: .${ext}`);
   }
+}
+
+// three.js skins with 4 bone influences per vertex. Some exporters write 8 or 12
+// (JOINTS_1/WEIGHTS_1, ...), which three.js would otherwise ignore, distorting the
+// mesh. Keep the 4 strongest influences per vertex, renormalized, and drop the rest.
+function reduceSkinInfluences(root) {
+  root.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const g = o.geometry;
+    const extra = [];
+    for (let k = 1; g.getAttribute(`joints_${k}`) && g.getAttribute(`weights_${k}`); k++) {
+      extra.push([g.getAttribute(`joints_${k}`), g.getAttribute(`weights_${k}`)]);
+    }
+    if (!extra.length) return;
+    const sets = [[g.getAttribute("skinIndex"), g.getAttribute("skinWeight")], ...extra];
+    const count = g.getAttribute("position").count;
+    const outIdx = new Uint16Array(count * 4);
+    const outW = new Float32Array(count * 4);
+    const n = sets.length * 4;
+    const idx = new Float32Array(n), w = new Float32Array(n);
+    const pick = new Int32Array(4);
+    for (let v = 0; v < count; v++) {
+      let m = 0;
+      for (const [ji, wi] of sets) {
+        for (let c = 0; c < 4; c++) {
+          idx[m] = ji.getComponent(v, c);
+          w[m] = wi.getComponent(v, c);
+          m++;
+        }
+      }
+      // Select the 4 largest weights (n is small, so a few linear passes beat sorting).
+      let sum = 0;
+      for (let c = 0; c < 4; c++) {
+        let best = -1;
+        for (let k = 0; k < n; k++) if (w[k] >= 0 && (best < 0 || w[k] > w[best])) best = k;
+        pick[c] = best;
+        sum += w[best];
+        w[best] = -w[best] - 1; // mark as used, keep value recoverable
+      }
+      for (let c = 0; c < 4; c++) {
+        const k = pick[c];
+        const weight = -w[k] - 1;
+        outIdx[v * 4 + c] = idx[k];
+        outW[v * 4 + c] = sum > 0 ? weight / sum : (c === 0 ? 1 : 0);
+      }
+    }
+    g.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(outIdx, 4));
+    g.setAttribute("skinWeight", new THREE.Float32BufferAttribute(outW, 4));
+    for (let k = 1; k <= extra.length; k++) {
+      g.deleteAttribute(`joints_${k}`);
+      g.deleteAttribute(`weights_${k}`);
+    }
+  });
 }
 
 // Robust bounds for splats: percentile-trimmed so stray "floaters" don't shrink the model.
@@ -432,10 +521,87 @@ function disposeObject(obj) {
 
 function clearModel() {
   if (!current) return;
+  clearAnimations();
   modelRoot.clear();
   disposeObject(current.object);
   current = null;
 }
+
+// ---------------------------------------------------------------------------
+// Animation playback (glTF/GLB, FBX, DAE)
+// ---------------------------------------------------------------------------
+const anim = { mixer: null, clips: [], index: 0, action: null, playing: false, speed: 1 };
+const animTimer = new THREE.Timer();
+
+function setupAnimations(object, clips) {
+  clearAnimations();
+  const usable = (clips || []).filter((c) => c && c.duration > 0 && c.tracks.length > 0);
+  if (!usable.length) return;
+  anim.mixer = new THREE.AnimationMixer(object);
+  anim.clips = usable;
+  anim.speed = Number(ui.animSpeed.value) || 1;
+  anim.mixer.timeScale = anim.speed;
+  ui.animClip.innerHTML = "";
+  usable.forEach((clip, i) => {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${clip.name || `Animation ${i + 1}`} (${clip.duration.toFixed(1)}s)`;
+    ui.animClip.appendChild(opt);
+  });
+  ui.animPanel.hidden = false;
+  playClip(0);
+}
+
+function clearAnimations() {
+  if (anim.mixer) {
+    anim.mixer.stopAllAction();
+    anim.mixer.uncacheRoot(anim.mixer.getRoot());
+  }
+  anim.mixer = null;
+  anim.clips = [];
+  anim.action = null;
+  anim.playing = false;
+  ui.animPanel.hidden = true;
+}
+
+function playClip(i) {
+  if (!anim.mixer || !anim.clips.length) return;
+  const n = anim.clips.length;
+  anim.index = ((i % n) + n) % n;
+  const next = anim.mixer.clipAction(anim.clips[anim.index]);
+  next.reset();
+  next.setLoop(THREE.LoopRepeat, Infinity);
+  next.enabled = true;
+  next.paused = false;
+  if (anim.action && anim.action !== next) {
+    next.play();
+    anim.action.crossFadeTo(next, 0.25, false);
+  } else {
+    next.play();
+  }
+  anim.action = next;
+  anim.playing = true;
+  ui.animClip.value = String(anim.index);
+  updateAnimUi();
+}
+
+function setPlaying(playing) {
+  if (!anim.action) return;
+  anim.playing = playing;
+  anim.action.paused = !playing;
+  updateAnimUi();
+}
+
+function updateAnimUi() {
+  ui.animPlay.textContent = anim.playing ? "Pause" : "Play";
+}
+
+ui.animClip.addEventListener("change", () => playClip(Number(ui.animClip.value)));
+ui.animPlay.addEventListener("click", () => setPlaying(!anim.playing));
+ui.animSpeed.addEventListener("change", () => {
+  anim.speed = Number(ui.animSpeed.value) || 1;
+  if (anim.mixer) anim.mixer.timeScale = anim.speed;
+});
 
 // Place `object` inside modelRoot so its center sits on modelRoot's origin, and return the fit scale.
 function mountModel(object, kind) {
@@ -445,7 +611,11 @@ function mountModel(object, kind) {
     box = splatBounds(object);
   } else {
     object.updateMatrixWorld(true);
-    box = new THREE.Box3().setFromObject(object, true);
+    // Skinned meshes are measured in their current pose; other meshes use their geometry bounds.
+    box = new THREE.Box3().setFromObject(object, false);
+    // A skinned mesh's culling bounds come from its rest pose, so animation can move it
+    // outside them and make it vanish. Skip culling for those (there's only one model).
+    object.traverse((o) => { if (o.isSkinnedMesh) o.frustumCulled = false; });
   }
 
   const inner = new THREE.Group();
@@ -493,6 +663,7 @@ async function openFile(file) {
     setProgress(kind === "splat" ? 0 : "indeterminate");
 
     let object;
+    let animations = [];
     if (kind === "splat") {
       let reportedOptimizing = false;
       object = await loadSplat(file, ext, (f) => {
@@ -504,11 +675,13 @@ async function openFile(file) {
         }
       });
     } else {
-      object = await loadMesh(file, ext);
+      ({ object, animations } = await loadMesh(file, ext));
+      reduceSkinInfluences(object);
     }
 
     const fitScale = mountModel(object, kind);
     current = { kind, object, name: file.name, fitScale };
+    if (kind === "mesh") setupAnimations(object, animations);
     modelRoot.position.copy(DESKTOP_HOME);
     modelRoot.quaternion.identity();
     modelRoot.scale.setScalar(fitScale);
@@ -517,8 +690,9 @@ async function openFile(file) {
 
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const count = kind === "splat" && object.numSplats ? ` · ${object.numSplats.toLocaleString()} splats` : "";
+    const animNote = anim.clips.length ? ` · ${anim.clips.length} animation${anim.clips.length > 1 ? "s" : ""}` : "";
     setProgress(null);
-    setStatus(`Loaded ${file.name}${count} in ${secs}s.`);
+    setStatus(`Loaded ${file.name}${count}${animNote} in ${secs}s.`);
     await enterXR({ auto: true });
   } catch (err) {
     console.error(err);
@@ -625,7 +799,7 @@ const hands = [0, 1].map((i) => {
   );
   grip.add(marker);
   scene.add(grip);
-  const hand = { index: i, grip, marker, source: null, prev: [] , gripping: false };
+  const hand = { index: i, grip, marker, source: null, prev: [], gripping: false, stickArmed: true };
   grip.addEventListener("connected", (e) => { hand.source = e.data; hand.prev = []; });
   grip.addEventListener("disconnected", () => { hand.source = null; hand.gripping = false; hand.prev = []; rebase(); });
   return hand;
@@ -798,6 +972,21 @@ function handleXRInput() {
     h.marker.material.opacity = h.gripping ? 0.9 : 0.35;
     if (pressedEdge(h, BUTTON.ax).down) reset = true;
     if (pressedEdge(h, BUTTON.by).down) exit = true;
+
+    // Animation controls: trigger toggles play/pause, thumbstick flick changes clip.
+    if (pressedEdge(h, BUTTON.trigger).down && anim.action) {
+      setPlaying(!anim.playing);
+      pulse(h, 0.25, 20);
+    }
+    const x = h.source.gamepad.axes?.[STICK_X] ?? 0;
+    if (!h.stickArmed && Math.abs(x) < STICK_RELEASE) h.stickArmed = true;
+    if (h.stickArmed && Math.abs(x) > STICK_FLICK) {
+      h.stickArmed = false;
+      if (anim.clips.length > 1) {
+        playClip(anim.index + (x > 0 ? 1 : -1));
+        pulse(h, 0.25, 20);
+      }
+    }
   }
   if (changed) rebase();
   if (reset) { resetModel(); for (const h of hands) pulse(h, 0.2, 20); }
@@ -808,7 +997,11 @@ function handleXRInput() {
 // ---------------------------------------------------------------------------
 // Render loop
 // ---------------------------------------------------------------------------
-renderer.setAnimationLoop(() => {
+renderer.setAnimationLoop((time) => {
+  // Cap the step so a stall (e.g. entering VR) doesn't make the animation jump ahead.
+  animTimer.update(time);
+  const dt = Math.min(animTimer.getDelta(), 0.1);
+  if (anim.mixer) anim.mixer.update(dt);
   if (renderer.xr.isPresenting) {
     for (const h of hands) h.grip.updateMatrixWorld(true);
     if (pendingReset) {
@@ -859,7 +1052,7 @@ ui.floor.addEventListener("change", () => {
 });
 
 // Handy for debugging from the Quest browser's remote devtools (chrome://inspect)
-window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, get current() { return current; } };
+window.grabViewer = { THREE, scene, renderer, modelRoot, spark, hands, grab, rebase, applyGrab, openFile, anim, playClip, setPlaying, get current() { return current; } };
 </script>
 </body>
 </html>

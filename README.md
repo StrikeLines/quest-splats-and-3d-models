@@ -18,11 +18,15 @@ Built with [three.js](https://threejs.org) and [Spark](https://sparkjs.dev). Spa
 | Grip (both hands) | Spread apart to zoom in, bring together to zoom out, turn like a steering wheel to rotate |
 | A or X | Reset the model in front of you |
 | B or Y | Leave VR and return to the file picker |
+| Trigger | Play or pause the animation (animated models) |
+| Thumbstick left / right | Previous / next animation, if the model has several |
 
 ## Formats
 
 - **Splats:** `.ply` (3DGS), `.spz`, `.splat`, `.ksplat`, `.sog`, `.zip` (SOG), `.rad`
 - **Models:** `.glb`, `.gltf` (embedded), `.obj`, `.fbx`, `.stl`, `.ply` (mesh or points), `.dae`, `.3mf`, `.usdz`
+
+Animated models play automatically. This works for skinned (rigged) and node animations in `.glb`/`.gltf`, `.fbx` and `.dae`. On the 2D page you can pick the animation, pause it and change its speed. Models that store more than 4 bone influences per vertex are reduced to the strongest 4 when they load, since three.js uses 4.
 
 Files must be self-contained. External textures and `.mtl` files aren't loaded, so use GLB for textured models.
 
