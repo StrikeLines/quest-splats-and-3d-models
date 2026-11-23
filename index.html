@@ -113,9 +113,9 @@
     </table>
     <p class="formats" style="margin-top:14px">Rigged models (posing):</p>
     <table class="controls">
-      <tr><td>Trigger + drag</td><td>Point at a body part and drag it; the joints above it bend to follow. It stays pinned where you leave it.</td></tr>
-      <tr><td>Both triggers</td><td>Pose two parts at once, e.g. grab both shoulders and push one, pull the other to twist the torso</td></tr>
-      <tr><td>Trigger tap</td><td>Pin or unpin a part without moving it</td></tr>
+      <tr><td>Touch a joint + trigger</td><td>Touch a joint (the dots near your controller) with the controller tip, hold the trigger and move your hand: forward/back, up/down, left/right. The joints above it bend to follow, and it stays pinned where you let go.</td></tr>
+      <tr><td>Both triggers</td><td>Grab two joints at once, e.g. both shoulders: push one, pull the other to twist the torso</td></tr>
+      <tr><td>Trigger tap on a joint</td><td>Pin or unpin it without moving it</td></tr>
       <tr><td>Thumbstick up / down</td><td>More / fewer joints bend when you drag</td></tr>
       <tr><td>Thumbstick left / right</td><td>Undo / redo (on models that can't be posed: previous / next animation)</td></tr>
     </table>
@@ -260,6 +260,8 @@ const POSE = {
   maxStepAngle: 0.5,             // radians a joint may turn per solver step (keeps motion smooth)
   tapMs: 350,                    // a trigger press shorter than this, without moving, is a tap (pin toggle)
   tapMove: 0.01,                 // meters
+  touchRadius: 0.07,             // VR: how close the controller tip must be to a joint to grab it (meters)
+  jointDotRange: 0.35,           // VR: show joint dots within this distance of a controller (meters)
   undoLimit: 60,
 };
 
@@ -1803,11 +1805,29 @@ function controllerRay(h, origin, dir) {
   dir.set(0, 0, -1).transformDirection(h.ray.matrixWorld);
 }
 
+// The controller's tip (the front of the controller, where its pointer ray starts).
+function controllerTip(h, out) {
+  return out.setFromMatrixPosition(h.ray.matrixWorld);
+}
+
+// VR: the joint the controller tip is touching (nearest within reach), or null.
+function touchPick(h) {
+  const rig = pose.rig;
+  if (!rig || !h.source) return null;
+  const tip = controllerTip(h, new THREE.Vector3());
+  const p = _pv[0];
+  let best = null;
+  for (const b of rig.bones) {
+    p.setFromMatrixPosition(b.matrixWorld);
+    const d = p.distanceTo(tip);
+    if (d <= POSE.touchRadius && (!best || d < best.d)) best = { bone: b, point: p.clone(), d };
+  }
+  return best;
+}
+
 function beginPoseGrab(h) {
   modelRoot.updateMatrixWorld(true);
-  const origin = new THREE.Vector3(), dir = new THREE.Vector3();
-  controllerRay(h, origin, dir);
-  const hit = pickBone(origin, dir);
+  const hit = touchPick(h);
   if (!hit) return false;
   const ctrl = new THREE.Vector3().setFromMatrixPosition(h.grip.matrixWorld);
   h.poseGrab = makeGrab(hit);
@@ -1931,12 +1951,17 @@ function makeDot(color, radius) {
   return m;
 }
 const poseVis = {
-  hover: hands.map(() => makeDot(0x4fb3ff, 0.012)),
+  hover: hands.map(() => makeDot(0x4fb3ff, 0.014)),
   chain: hands.map(() => Array.from({ length: POSE.maxChain }, () => makeDot(0xffffff, 0.007))),
   pins: [],
+  joints: [],               // VR: dots on the joints near a controller
+  tips: hands.map(() => makeDot(0x4fb3ff, 0.006)), // VR: the grab point at each controller's tip
 };
+for (const d of poseVis.joints) d.material.opacity = 0.45;
 function hidePoseVisuals() {
   for (const h of hands) h.rayLine.visible = false;
+  for (const d of poseVis.joints) d.visible = false;
+  for (const d of poseVis.tips) d.visible = false;
   for (const d of poseVis.hover) d.visible = false;
   for (const set of poseVis.chain) for (const d of set) d.visible = false;
   for (const d of poseVis.pins) d.visible = false;
@@ -1972,22 +1997,41 @@ function updatePoseVisuals() {
     updatePinMarkers();
     return;
   }
-  const origin = new THREE.Vector3(), dir = new THREE.Vector3();
+  // Touch-to-grab: dots mark the joints near each controller; the touched joint is highlighted.
+  const tips = hands.map((h) => (h.source ? controllerTip(h, new THREE.Vector3()) : null));
   hands.forEach((h, i) => {
-    let bone = null, point = null, rayLen = 1.0;
+    let bone = null, point = null;
     if (h.source && !h.gripping) {
       if (h.poseGrab) {
         bone = h.poseGrab.bone;
         point = bone.localToWorld(h.poseGrab.local.clone());
       } else {
-        controllerRay(h, origin, dir);
-        const hit = pickBone(origin, dir);
-        if (hit) { bone = hit.bone; point = hit.point; rayLen = hit.t; }
+        const hit = touchPick(h);
+        if (hit) { bone = hit.bone; point = hit.point; }
       }
     }
-    h.rayLine.visible = !!h.source && !h.gripping && !h.poseGrab;
-    h.rayLine.scale.z = Math.max(0.05, rayLen);
+    // A light buzz when the tip starts touching a new joint
+    if (!h.poseGrab && bone && bone !== h.hoverBone) pulse(h, 0.15, 12);
+    h.hoverBone = h.poseGrab ? h.poseGrab.bone : bone;
+    h.rayLine.visible = false;
+    const tipDot = poseVis.tips[i];
+    tipDot.visible = !!tips[i] && !h.gripping && !h.poseGrab;
+    if (tipDot.visible) tipDot.position.copy(tips[i]);
     showPoseMarker(i, bone, point, !!h.poseGrab);
+  });
+  const bones = pose.rig.bones;
+  while (poseVis.joints.length < bones.length) {
+    const d = makeDot(0xffffff, 0.006);
+    d.material.opacity = 0.45;
+    poseVis.joints.push(d);
+  }
+  const p = new THREE.Vector3();
+  poseVis.joints.forEach((d, k) => {
+    const b = bones[k];
+    if (!b) { d.visible = false; return; }
+    p.setFromMatrixPosition(b.matrixWorld);
+    d.visible = tips.some((t) => t && t.distanceTo(p) < POSE.jointDotRange);
+    if (d.visible) d.position.copy(p);
   });
   updatePinMarkers();
 }

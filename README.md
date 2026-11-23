@@ -27,9 +27,9 @@ Any model with a skeleton can be posed. The viewer works from the bone hierarchy
 
 | Input | Action |
 | --- | --- |
-| Trigger + drag | Point at a body part and drag it. The joints above it bend to follow, for example dragging a foot bends the knee and hip. The part stays pinned where you leave it. |
-| Both triggers | Pose two parts at once. Grab both shoulders and push one forward, pull the other back, and the torso twists, with the turn spread along the spine. |
-| Trigger tap | Pin or unpin a part without moving it. Pinned parts hold still while you pose the rest. |
+| Touch a joint + trigger | Touch a joint with the tip of the controller, hold the trigger and move your hand: forward/back, up/down, left/right. The joints above it bend to follow, for example moving the ankle bends the knee and hip. The joint stays pinned where you let go. |
+| Both triggers | Grab two joints at once. Grab both shoulders and push one forward, pull the other back, and the torso twists, with the turn spread along the spine. |
+| Trigger tap on a joint | Pin or unpin it without moving it. Pinned joints hold still while you pose the rest. |
 | Thumbstick up / down | More / fewer joints bend when you drag (1–8, default 3) |
 
 #### With a mouse, in the 2D view
@@ -46,7 +46,7 @@ You can also pose on a PC before entering VR, one part at a time:
 
 The two-hand twist needs both controllers, so it's VR only.
 
-While you point, a dot shows the part you'd grab and small dots mark the joints that will bend. Orange dots are pins. Posing pauses any playing animation; pressing play hands control back to the animation. The 2D page also has Undo, Redo, Reset pose and Clear pins buttons.
+In VR, faint dots mark the joints near your controllers, and a small dot marks the grab point at each controller's tip. The joint you're touching is highlighted (with a light buzz), and white dots mark the joints that will bend. With the mouse, pointing at a part highlights it the same way. Orange dots are pins. Posing pauses any playing animation; pressing play hands control back to the animation. The 2D page also has Undo, Redo, Reset pose and Clear pins buttons.
 
 #### Natural joint limits (Mixamo rigs)
 
